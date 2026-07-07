@@ -1,12 +1,17 @@
 {
   "name": "pi-privacy",
-  "version": "0.0.0",
-  "private": true,
-  "description": "Privacy posture + TEE attestation for Pi (@earendil-works/pi-*) providers: verified confidential-enclave inference, enforced/labeled ZDR, and on-device detection — honestly graded. WORKING NAME; final package name TBD at publish.",
+  "version": "0.1.0",
+  "description": "Privacy posture + TEE attestation for Pi providers: cryptographically verified confidential-enclave (TEE) inference, enforced/labeled zero-data-retention (ZDR), and on-device detection — honestly graded so a verified guarantee never reads like a claimed one.",
   "type": "module",
   "license": "MIT",
   "author": "Patrick (zahnno)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/privateer-agent/pi-privacy.git"
+  },
+  "homepage": "https://github.com/privateer-agent/pi-privacy",
   "keywords": [
+    "pi-package",
     "pi",
     "pi-extension",
     "tee",
@@ -19,12 +24,21 @@
     "privacy",
     "sev-snp"
   ],
+  "pi": {
+    "extensions": ["./extensions"]
+  },
   "exports": {
     ".": "./src/index.ts",
     "./attest": "./src/attest/dispatcher.ts",
     "./attestation": "./src/attest/attestation.ts",
     "./extension": "./src/extension.ts"
   },
+  "files": [
+    "src",
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "for f in tests/*.test.ts; do node --import tsx --test \"$f\" || exit 1; done"
@@ -32,9 +46,16 @@
   "engines": {
     "node": ">=22.19.0"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.80.0",
     "@earendil-works/pi-ai": ">=0.80.0"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": { "optional": true },
+    "@earendil-works/pi-ai": { "optional": true }
   },
   "dependencies": {
     "undici": "^7.28.0"
