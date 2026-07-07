@@ -99,21 +99,43 @@ test("extension registers config-only providers, not built-ins", () => {
   assert.ok(pi.commands.includes("verify"));
 });
 
-test("before_provider_request patches venice only when venice is current", () => {
+test("before_provider_request patches venice only when venice is current", async () => {
   const pi = fakePi();
-  makePiPrivacyExtension({ installDispatcher: false })(pi as any);
-  const req = pi.handlers["before_provider_request"];
+  makePiPrivacyExtension({ installDispatcher: false, piiPolicy: "off" })(pi as any);
+  const req = pi.handlers["before_provider_request"]; // now async
   const sel = pi.handlers["model_select"];
 
   // No model selected → no patch.
-  assert.equal(req({ payload: { a: 1 } }, {}), undefined);
+  assert.equal(await req({ payload: { a: 1 } }, {}), undefined);
 
   // Select venice → venice payload is patched.
   sel({ model: { provider: "venice", id: "m" } }, {});
-  const out = req({ payload: { a: 1 } }, {});
+  const out = await req({ payload: { a: 1 } }, {});
   assert.equal((out as any).venice_parameters.include_venice_system_prompt, false);
 
   // Switch to a non-venice provider → no patch again.
   sel({ model: { provider: "groq", id: "m" } }, {});
-  assert.equal(req({ payload: { a: 1 } }, {}), undefined);
+  assert.equal(await req({ payload: { a: 1 } }, {}), undefined);
+});
+
+test("PII gate: warns/redacts below TEE, skips verified-private, remembers choice", async () => {
+  const pi = fakePi();
+  const asks: string[] = [];
+  const ctx = {
+    hasUI: true,
+    ui: { select: async (title: string) => (asks.push(title), "Redact + remember for session") },
+  };
+  makePiPrivacyExtension({ installDispatcher: false })(pi as any);
+  const req = pi.handlers["before_provider_request"];
+  const sel = pi.handlers["model_select"];
+
+  sel({ model: { provider: "openrouter", id: "m" } }, {}); // zdr-policy → below verified-private
+  const payload = { messages: [{ role: "user", content: "email me at a@b.com" }] };
+  const out1 = await req({ payload }, ctx);
+  assert.equal(asks.length, 1, "prompted once");
+  assert.doesNotMatch(JSON.stringify(out1), /a@b\.com/, "PII redacted");
+  // Second call: choice remembered → no re-prompt, still redacted.
+  const out2 = await req({ payload }, ctx);
+  assert.equal(asks.length, 1, "not re-prompted");
+  assert.doesNotMatch(JSON.stringify(out2), /a@b\.com/);
 });

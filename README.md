@@ -49,6 +49,25 @@ Providers with no verifiable or default privacy channel (Together, DeepSeek, Min
 Qwen, …) are intentionally left `standard` with **no badge** — anything else would
 overclaim.
 
+## Posture-aware PII gate
+
+The second axis: not just *is the channel private*, but *should this data go down it*.
+Before a request leaves for an **unverified** channel (anything below verified-TEE /
+on-device), pi-privacy scans it for **structured PII** — emails, phones, SSNs, credit
+cards (Luhn-checked), IPs — and, by default, **warns** you with the choice to send,
+redact, or (implicitly) switch models. On a **verified-TEE** or **local** model it does
+nothing — an attested enclave can't read your data and a loopback endpoint never sends
+it. (ZDR is *not* exempt: a ZDR provider still *sees* the data, it just doesn't retain it.)
+
+```ts
+makePiPrivacyExtension({ piiPolicy: "warn" }); // "warn" (default) | "redact" | "off"
+```
+
+**Honesty bound (the whole point):** this is *best-effort structured-PII detection*,
+never a guarantee. It is local + deterministic — it never sends your data to a model to
+detect PII (that would leak it) — so it catches patterns, not names/addresses/context.
+It says so at the prompt. Treat it as a seatbelt, not a force field.
+
 ## How verification works
 
 - **Tinfoil (SPKI pinning).** Pi's provider requests flow through a process-wide

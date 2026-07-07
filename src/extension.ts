@@ -11,7 +11,39 @@ import { installAttestationDispatcher, dispatcherTransport } from "./attest/disp
 import { PRIVACY_PROVIDERS, type PrivacyProvider } from "./providers/catalog.ts";
 import { veniceRequestPatch, openRouterZdrPatch } from "./ext/patches.ts";
 import { verifyModelPosture, type PostureResult } from "./posture/verify.ts";
-import { TIERS } from "./posture/tiers.ts";
+import { TIERS, type PrivacyTier } from "./posture/tiers.ts";
+import { detectPii, redactPii, summarizePii } from "./pii/detect.ts";
+
+// Verified-private tiers where PII needs no gate: an attested enclave can't read it,
+// and a loopback endpoint never sends it. NOTE zdr-* is NOT here — a ZDR provider
+// still SEES the data (it just doesn't retain it), so PII exposure remains.
+function isVerifiedPrivate(tier: PrivacyTier | undefined): boolean {
+  return tier === "tee-verified" || tier === "local";
+}
+
+// Extract the outbound message text for detection, and redact PII structurally in the
+// payload's message content (string or content-part arrays).
+function payloadText(payload: any): string {
+  try {
+    return JSON.stringify(payload?.messages ?? payload ?? "");
+  } catch {
+    return "";
+  }
+}
+function redactPayloadPii(payload: any): any {
+  if (!payload || typeof payload !== "object" || !Array.isArray(payload.messages)) return payload;
+  const messages = payload.messages.map((m: any) => {
+    if (typeof m?.content === "string") return { ...m, content: redactPii(m.content) };
+    if (Array.isArray(m?.content)) {
+      return {
+        ...m,
+        content: m.content.map((p: any) => (typeof p?.text === "string" ? { ...p, text: redactPii(p.text) } : p)),
+      };
+    }
+    return m;
+  });
+  return { ...payload, messages };
+}
 
 // ── structural Pi surface (subset we use) ────────────────────────────────────
 interface PiModel {
@@ -19,7 +51,11 @@ interface PiModel {
   id?: string;
 }
 interface PiCtx {
-  ui?: { notify?: (message: string, level?: string) => void };
+  hasUI?: boolean;
+  ui?: {
+    notify?: (message: string, level?: string) => void;
+    select?: (title: string, options: string[], opts?: unknown) => Promise<string | undefined>;
+  };
 }
 interface PiExtensionApiLike {
   registerProvider?(name: string, config: unknown): void;
@@ -48,6 +84,12 @@ export interface PiPrivacyOptions {
   // Bind Tinfoil attestation to the real provider connection via the dispatcher
   // (default true when the dispatcher is installed). Falls back to httpsTransport.
   useDispatcherTransport?: boolean;
+  // Posture-aware structured-PII policy on outbound requests. "warn" (default):
+  // interactively warn + offer redact before sending PII down an UNVERIFIED channel;
+  // "redact": silently mask; "off": disabled. Only acts below verified-TEE/local
+  // (an attested/on-device channel is safe), and only where a UI can prompt. Detection
+  // is best-effort structured PII (emails/phones/SSNs/cards/IPs) — NOT a guarantee.
+  piiPolicy?: "warn" | "redact" | "off";
 }
 
 // Config-only providers Pi doesn't ship: register these. Built-ins + custom skipped.
@@ -103,6 +145,7 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
     enforceOpenRouterZdr = false,
     onPosture,
     useDispatcherTransport = true,
+    piiPolicy = "warn",
   } = opts;
 
   return function piPrivacy(pi: PiExtensionApiLike): void {
@@ -116,16 +159,22 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
 
     let currentProviderId: string | undefined;
     let currentModelId: string | undefined;
+    // The VERIFIED tier of the current model (attestation result), cached for the PII
+    // gate. Undefined until computed → the gate treats "unknown" as not-verified (safe).
+    let currentTier: PrivacyTier | undefined;
+    // Session PII decision so we don't re-prompt every turn once the user has chosen.
+    let piiChoice: "ask" | "send" | "redact" = "ask";
 
-    // Recompute + publish posture for the current model.
+    // Recompute posture for the current model; cache the tier and publish the badge.
     const refreshPosture = async () => {
-      if (!currentProviderId || !currentModelId || !onPosture) return;
+      if (!currentProviderId || !currentModelId) return;
       const result = await verifyModelPosture(currentProviderId, currentModelId, {
         apiKey: currentProviderId === "nearai" ? nearApiKey() : undefined,
         zdrEnforced: currentProviderId === "openrouter" && enforceOpenRouterZdr,
         transport: useDispatcherTransport && installDispatcher ? dispatcherTransport : undefined,
       });
-      onPosture(result);
+      currentTier = result.tier;
+      onPosture?.(result);
     };
 
     pi.on("model_select", (event) => {
@@ -135,14 +184,37 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
       void refreshPosture();
     });
 
-    // Per-provider request patches. Scoped to the current provider so we never
-    // mutate a payload bound for a different endpoint.
-    pi.on("before_provider_request", (event) => {
-      if (currentProviderId === "venice") return veniceRequestPatch(event?.payload);
-      if (currentProviderId === "openrouter" && enforceOpenRouterZdr) {
-        return openRouterZdrPatch(event?.payload);
+    // Per-provider request patches + the posture-aware PII gate.
+    pi.on("before_provider_request", async (event, ctx) => {
+      let payload = event?.payload;
+      // Provider-specific patches first (scoped to the current provider).
+      if (currentProviderId === "venice") payload = veniceRequestPatch(payload);
+      else if (currentProviderId === "openrouter" && enforceOpenRouterZdr) payload = openRouterZdrPatch(payload);
+
+      // PII gate: only below a VERIFIED-private tier (TEE-verified/local are safe —
+      // the provider can't read the data), and only where we can actually prompt.
+      if (piiPolicy !== "off" && !isVerifiedPrivate(currentTier)) {
+        const hits = detectPii(payloadText(payload));
+        if (hits.length > 0) {
+          let action: "send" | "redact" =
+            piiChoice !== "ask" ? piiChoice : piiPolicy === "redact" ? "redact" : "send";
+          if (piiChoice === "ask" && piiPolicy === "warn" && ctx?.hasUI && typeof ctx.ui?.select === "function") {
+            const tierLabel = TIERS[currentTier ?? "standard"].label;
+            const choice = await ctx.ui.select(
+              `⚠ ${summarizePii(hits)} detected — sending to an unverified channel (${tierLabel}). ` +
+                `Best-effort structured-PII detection only, not a guarantee.`,
+              ["Send as-is", "Redact PII", "Redact + remember for session", "Send + remember for session"],
+            );
+            if (choice === "Redact PII") action = "redact";
+            else if (choice === "Redact + remember for session") ((action = "redact"), (piiChoice = "redact"));
+            else if (choice === "Send + remember for session") ((action = "send"), (piiChoice = "send"));
+            else action = "send"; // "Send as-is" or cancelled
+          }
+          if (action === "redact") payload = redactPayloadPii(payload);
+        }
       }
-      return undefined;
+
+      return payload === event?.payload ? undefined : payload;
     });
 
     if (typeof pi.registerCommand === "function") {

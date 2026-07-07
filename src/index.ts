@@ -66,3 +66,13 @@ export {
 } from "./extension.ts";
 
 export { veniceRequestPatch, openRouterZdrPatch } from "./ext/patches.ts";
+
+// Local structured-PII detection (best-effort; emails/phones/SSNs/cards/IPs).
+export {
+  type PiiType,
+  type PiiHit,
+  detectPii,
+  hasPii,
+  redactPii,
+  summarizePii,
+} from "./pii/detect.ts";
