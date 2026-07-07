@@ -1,0 +1,44 @@
+{
+  "name": "pi-privacy",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Privacy posture + TEE attestation for Pi (@earendil-works/pi-*) providers: verified confidential-enclave inference, enforced/labeled ZDR, and on-device detection — honestly graded. WORKING NAME; final package name TBD at publish.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Patrick (zahnno)",
+  "keywords": [
+    "pi",
+    "pi-extension",
+    "tee",
+    "attestation",
+    "confidential-computing",
+    "tinfoil",
+    "near",
+    "zdr",
+    "zero-data-retention",
+    "privacy",
+    "sev-snp"
+  ],
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "for f in tests/*.test.ts; do node --import tsx --test \"$f\" || exit 1; done"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.80.0",
+    "@earendil-works/pi-ai": ">=0.80.0"
+  },
+  "dependencies": {
+    "undici": "^7.28.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "tsx": "^4.16.0",
+    "typescript": "^5.5.0"
+  }
+}
