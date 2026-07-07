@@ -34,6 +34,9 @@ async function main() {
 
   console.log("── Tinfoil (SEV-SNP SPKI pin) ──");
   const tHttps = await tinfoil("httpsTransport", httpsTransport);
+  // Regression guard: a second call must ALSO be green. TLS session resumption used
+  // to return an empty peer cert on the abbreviated handshake → green→yellow flip.
+  const tHttps2 = await tinfoil("httpsTransport#2", httpsTransport);
 
   // Dispatcher path: install, then fetch the doc THROUGH the global dispatcher so
   // the connect hook captures the enclave SPKI, and the transport reads it back.
@@ -53,7 +56,7 @@ async function main() {
   }
 
   console.log("\n════════ ATTESTATION SMOKE VERDICT ════════");
-  const tinfoilOk = tHttps === "green" && tDispatch === "green";
+  const tinfoilOk = tHttps === "green" && tHttps2 === "green" && tDispatch === "green";
   const nearOk = nearPosture === "green" || nearPosture === "yellow";
   console.log(`  Tinfoil verified TEE (both transports green) .. ${tinfoilOk ? "PASS ✅" : "FAIL ❌"}`);
   console.log(`  NEAR attestation reachable (green/yellow) ..... ${nearOk ? "PASS ✅" : "WARN ⚠️  (" + nearPosture + ")"}`);

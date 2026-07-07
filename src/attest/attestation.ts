@@ -168,11 +168,19 @@ export const httpsTransport: TinfoilTransport = (host) =>
         path: url.pathname,
         method: "GET",
         timeout: TIMEOUT_MS,
+        // Force a fresh connection + full TLS handshake every time. A pooled/
+        // resumed TLS session skips re-sending the server cert, so
+        // getPeerCertificate() returns {} on the abbreviated handshake and the
+        // key binding silently fails (posture flips green→yellow on re-verify).
+        // Attestation must observe a real handshake anyway, so no session reuse.
+        agent: false,
       },
       (res) => {
         let liveTlsKeyFp: string | undefined;
         try {
-          const peer = (res.socket as TLSSocket).getPeerCertificate();
+          // getPeerCertificate(true) → include the full chain / raw DER even when
+          // the default view would omit it.
+          const peer = (res.socket as TLSSocket).getPeerCertificate(true);
           if (peer?.raw) {
             const spki = new X509Certificate(peer.raw).publicKey.export({ type: "spki", format: "der" });
             liveTlsKeyFp = createHash("sha256").update(spki).digest("hex");
