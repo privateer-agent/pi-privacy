@@ -23,6 +23,33 @@ export {
   isLocalEndpoint,
 } from "./providers/catalog.ts";
 
+// Attestation engine (ported from privateer 0.2, minus the private server-proxy path).
+export {
+  type TeePosture,
+  type AttestConfig,
+  type Attestation,
+  type TinfoilAttestation,
+  type TinfoilTransport,
+  NEARAI_BASE_URL,
+  TINFOIL_BASE_URL,
+  randomNonce,
+  fetchAttestation,
+  interpretReport,
+  teePosture,
+  httpsTransport,
+  fetchTinfoilAttestation,
+  interpretTinfoilDoc,
+  tinfoilTeePosture,
+} from "./attest/attestation.ts";
+
+export {
+  type CapturedCert,
+  installAttestationDispatcher,
+  getCapturedCert,
+  capturedHosts,
+  dispatcherTransport,
+} from "./attest/dispatcher.ts";
+
 // Resolve a provider's effective tier, accounting for on-device detection and
 // posture-aware providers. `zdrEnforced` reflects whether ZDR routing is actively
 // pinned this session (OpenRouter). Kept here so both the badge layer and the

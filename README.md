@@ -41,10 +41,19 @@ would overclaim.
 
 ## Status
 
-Scaffold + the honest taxonomy (`src/posture/tiers.ts`, `src/providers/catalog.ts`,
-`effectiveTier`). **Next:** port the attestation engine (`interpretTinfoilDoc`,
-`teePosture`, SEV-SNP `report_data` parse) and the dispatcher-as-extension
-(spike-proven to work at extension-init), then a live posture smoke against real
-Tinfoil / NEAR endpoints.
+Taxonomy + attestation engine, **verified against real enclaves**:
+
+- `src/posture/tiers.ts`, `src/providers/catalog.ts`, `effectiveTier` — the honest ladder.
+- `src/attest/attestation.ts` — TEE attestation (NEAR report-body, Tinfoil SEV-SNP
+  SPKI pin), ported from privateer 0.2 minus the private server-proxy path.
+- `src/attest/dispatcher.ts` — the out-of-band undici dispatcher + a `dispatcherTransport`
+  that binds attestation to the real provider connection.
+- 17 unit tests; `scripts/smoke-attest.ts` verifies live: **Tinfoil green** (attested
+  SPKI == live SPKI, via both the self-contained and dispatcher transports) and
+  **NEAR green** (NVIDIA + Intel TDX, signing key, nonce echoed).
+
+**Next:** the Pi extension entry — `registerProvider` for these providers, install
+the dispatcher at extension-init, verify posture per model, enforce/label ZDR, and
+expose the badge state. Then privateer-agent depends on this package.
 
 Requires Node ≥ 22.19.0 (the Pi stack's floor). MIT.
