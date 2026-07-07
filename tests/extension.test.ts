@@ -19,9 +19,9 @@ test("veniceRequestPatch merges into existing venice_parameters", () => {
   assert.deepEqual(out.venice_parameters, { foo: 1, include_venice_system_prompt: false });
 });
 
-test("openRouterZdrPatch pins zdr routing", () => {
+test("openRouterZdrPatch pins zdr routing (verified OpenRouter params)", () => {
   const out = openRouterZdrPatch({ model: "x", provider: { sort: "price" } });
-  assert.deepEqual(out.provider, { sort: "price", zdr: true });
+  assert.deepEqual(out.provider, { sort: "price", zdr: true, data_collection: "deny" });
 });
 
 // ── verifyModelPosture ───────────────────────────────────────────────────────

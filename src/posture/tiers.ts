@@ -67,8 +67,9 @@ export const TIERS: Record<PrivacyTier, TierInfo> = {
     verifiability: "observable",
     posture: "green",
     blurb:
-      "Zero-retention routing is actively pinned this session, so requests only reach " +
-      "endpoints that contractually don't retain data. Policy, not hardware — not attested.",
+      "Routing is constrained to providers that contractually don't retain data — " +
+      "verified observable: OpenRouter refuses to serve when the policy can't be met. " +
+      "Enforcement of a policy, not hardware attestation.",
   },
   "zdr-policy": {
     tier: "zdr-policy",

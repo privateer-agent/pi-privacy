@@ -68,8 +68,12 @@ Taxonomy + attestation engine, **verified against real enclaves**:
 
 Or embed it: `makePiPrivacyExtension({ onPosture })` in your `extensionFactories`.
 
-**Next:** wire privateer-agent to depend on this package (`file:../pi-privacy`) and
-drop its stub dispatcher; verify OpenRouter's ZDR routing param live before badging
-`zdr-enforced`.
+- ZDR enforcement **verified live** (`scripts/smoke-zdr.ts`): OpenRouter honors
+  `provider.{zdr,data_collection:"deny"}` and 404s when the policy can't be met —
+  so `zdr-enforced` is an honest badge (enforcement of a policy, observable; not attestation).
+
+privateer-agent consumes this package (`file:../pi-privacy`) and its
+`scripts/smoke-integration.ts` verifies a real Tinfoil turn's connection against the
+enclave attestation end-to-end.
 
 Requires Node ≥ 22.19.0 (the Pi stack's floor). MIT.

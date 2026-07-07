@@ -38,8 +38,10 @@ export interface PiPrivacyOptions {
   // seed models (default true). Built-in providers (openrouter/fireworks) are left
   // to Pi so their model listings aren't clobbered.
   registerProviders?: boolean;
-  // Attempt OpenRouter ZDR routing enforcement (default false — the exact routing
-  // param is unverified, so we don't badge "enforced" until it's confirmed live).
+  // Enforce OpenRouter ZDR routing (default false — opt-in, since a model with no
+  // zero-retention endpoint will 404 rather than fall back). VERIFIED honest: when
+  // on, requests carry provider.{zdr:true,data_collection:"deny"}, which OpenRouter
+  // observably enforces (it 404s if unsatisfiable), so the zdr-enforced badge is earned.
   enforceOpenRouterZdr?: boolean;
   // Called whenever the current model's posture is (re)computed — the badge feed.
   onPosture?: (result: PostureResult) => void;

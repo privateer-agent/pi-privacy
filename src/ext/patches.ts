@@ -18,17 +18,19 @@ export function veniceRequestPatch(payload: unknown): Record<string, unknown> {
 }
 
 // OpenRouter: pin ZERO-DATA-RETENTION routing so requests only reach endpoints that
-// don't retain data. This turns openrouter's tier from zdr-policy → zdr-enforced.
+// don't retain data. Turns openrouter's tier from zdr-policy → zdr-enforced.
 //
-// HONESTY GATE: the enforced tier is only earned if this patch is actually applied
-// AND OpenRouter honors the routing key. The exact field is TODO(verify) against
-// OpenRouter's current routing schema — until verified live, callers should treat
-// OpenRouter as zdr-policy, not zdr-enforced, and this patch as best-effort. We do
-// NOT want to badge "enforced" on an unverified param.
+// VERIFIED LIVE (2026-07-07): OpenRouter honors `provider.data_collection: "deny"`
+// and `provider.zdr: true` — it filters routing to compliant providers and returns
+// 404 "No allowed providers are available" when the policy can't be satisfied
+// (i.e. it does NOT silently ignore the constraint). Mirrors pi-ai's native
+// OpenRouterRouting (`compat.openRouterRouting`), so the request body is identical
+// whether it comes from here or pi-ai. This is enforcement (observable routing),
+// NOT attestation — the zdr-enforced tier says so.
 export function openRouterZdrPatch(payload: unknown): Record<string, unknown> {
   const p = asObject(payload);
   const provider = p.provider && typeof p.provider === "object"
     ? (p.provider as Record<string, unknown>)
     : {};
-  return { ...p, provider: { ...provider, zdr: true } };
+  return { ...p, provider: { ...provider, zdr: true, data_collection: "deny" } };
 }
