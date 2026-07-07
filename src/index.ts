@@ -50,27 +50,19 @@ export {
   dispatcherTransport,
 } from "./attest/dispatcher.ts";
 
-// Resolve a provider's effective tier, accounting for on-device detection and
-// posture-aware providers. `zdrEnforced` reflects whether ZDR routing is actively
-// pinned this session (OpenRouter). Kept here so both the badge layer and the
-// picker sort share one honest source of truth.
-import { PROVIDER_BY_ID, isLocalEndpoint } from "./providers/catalog.ts";
-import type { PrivacyTier } from "./posture/tiers.ts";
+export { effectiveTier } from "./posture/effective.ts";
 
-export function effectiveTier(
-  providerId: string,
-  opts: { baseUrl?: string; zdrEnforced?: boolean } = {},
-): PrivacyTier {
-  const p = PROVIDER_BY_ID[providerId];
-  if (!p) return "standard";
-  // On-device beats a claimed policy tier: a loopback endpoint is observable.
-  if (p.local || isLocalEndpoint(opts.baseUrl)) return "local";
-  // OpenRouter: zdr-policy until routing is enforced, then zdr-enforced.
-  if (p.postureAware && p.id === "openrouter") {
-    return opts.zdrEnforced ? "zdr-enforced" : "zdr-policy";
-  }
-  // TEE providers advertise their ceiling; the actual green/yellow verdict comes
-  // from the attestation engine at runtime (tierFromTeePosture). This is the
-  // pre-attestation default.
-  return p.tier;
-}
+// Posture verification (attestation-backed) + the Pi extension entry.
+export {
+  type PostureResult,
+  type VerifyOptions,
+  verifyModelPosture,
+} from "./posture/verify.ts";
+
+export {
+  type PiPrivacyOptions,
+  makePiPrivacyExtension,
+  default as piPrivacyExtension,
+} from "./extension.ts";
+
+export { veniceRequestPatch, openRouterZdrPatch } from "./ext/patches.ts";

@@ -52,8 +52,24 @@ Taxonomy + attestation engine, **verified against real enclaves**:
   SPKI == live SPKI, via both the self-contained and dispatcher transports) and
   **NEAR green** (NVIDIA + Intel TDX, signing key, nonce echoed).
 
-**Next:** the Pi extension entry — `registerProvider` for these providers, install
-the dispatcher at extension-init, verify posture per model, enforce/label ZDR, and
-expose the badge state. Then privateer-agent depends on this package.
+- `src/extension.ts` — the installable Pi extension (`makePiPrivacyExtension` +
+  default export): installs the dispatcher at extension-init, registers the
+  config-only providers (tinfoil/nearai/venice/ollama — built-ins left to Pi),
+  patches venice / OpenRouter requests, tracks the current model to compute posture,
+  and adds `/verify`. Verified live via `scripts/smoke-extension.ts`: loads through
+  Pi's real resource loader and all four providers resolve, zero diagnostics.
+
+## Install (marketplace)
+
+```jsonc
+// pi settings — load the default extension
+{ "extensions": ["pi-privacy"] }
+```
+
+Or embed it: `makePiPrivacyExtension({ onPosture })` in your `extensionFactories`.
+
+**Next:** wire privateer-agent to depend on this package (`file:../pi-privacy`) and
+drop its stub dispatcher; verify OpenRouter's ZDR routing param live before badging
+`zdr-enforced`.
 
 Requires Node ≥ 22.19.0 (the Pi stack's floor). MIT.
