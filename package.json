@@ -20,7 +20,10 @@
     "sev-snp"
   ],
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./attest": "./src/attest/dispatcher.ts",
+    "./attestation": "./src/attest/attestation.ts",
+    "./extension": "./src/extension.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
