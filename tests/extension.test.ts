@@ -139,3 +139,16 @@ test("PII gate: warns/redacts below TEE, skips verified-private, remembers choic
   assert.equal(asks.length, 1, "not re-prompted");
   assert.doesNotMatch(JSON.stringify(out2), /a@b\.com/);
 });
+
+test("resolveTier override skips the PII gate on a verified-private tier", async () => {
+  const pi = fakePi();
+  const asks: string[] = [];
+  const ctx = { hasUI: true, ui: { select: async (t: string) => (asks.push(t), "Redact PII") } };
+  makePiPrivacyExtension({ installDispatcher: false, resolveTier: () => "tee-verified" })(pi as any);
+  pi.handlers["model_select"]({ model: { provider: "privateer", id: "near/x" } }, {});
+  await new Promise((r) => setImmediate(r)); // let refreshPosture resolve the tier
+  const payload = { messages: [{ role: "user", content: "email a@b.com" }] };
+  const out = await pi.handlers["before_provider_request"]({ payload }, ctx);
+  assert.equal(asks.length, 0, "verified-private tier → no PII prompt");
+  assert.match(JSON.stringify(out ?? payload), /a@b\.com/, "PII left intact on a TEE channel");
+});
