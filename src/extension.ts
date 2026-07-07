@@ -84,6 +84,10 @@ export interface PiPrivacyOptions {
   // Bind Tinfoil attestation to the real provider connection via the dispatcher
   // (default true when the dispatcher is installed). Falls back to httpsTransport.
   useDispatcherTransport?: boolean;
+  // Override the tier resolution for providers pi-privacy doesn't know (e.g. a host's
+  // private account channel). Return a PrivacyTier to use it (drives the PII gate +
+  // badge), or undefined to fall back to pi-privacy's built-in verified posture.
+  resolveTier?: (provider: string, modelId: string) => Promise<PrivacyTier | undefined> | PrivacyTier | undefined;
   // Posture-aware structured-PII policy on outbound requests. "warn" (default):
   // interactively warn + offer redact before sending PII down an UNVERIFIED channel;
   // "redact": silently mask; "off": disabled. Only acts below verified-TEE/local
@@ -146,6 +150,7 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
     onPosture,
     useDispatcherTransport = true,
     piiPolicy = "warn",
+    resolveTier,
   } = opts;
 
   return function piPrivacy(pi: PiExtensionApiLike): void {
@@ -168,6 +173,16 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
     // Recompute posture for the current model; cache the tier and publish the badge.
     const refreshPosture = async () => {
       if (!currentProviderId || !currentModelId) return;
+      // A host-supplied resolver (e.g. a private account channel pi-privacy doesn't
+      // know) wins — otherwise use the built-in verified posture.
+      if (resolveTier) {
+        const t = await resolveTier(currentProviderId, currentModelId);
+        if (t !== undefined) {
+          currentTier = t;
+          onPosture?.({ providerId: currentProviderId, modelId: currentModelId, tier: t });
+          return;
+        }
+      }
       const result = await verifyModelPosture(currentProviderId, currentModelId, {
         apiKey: currentProviderId === "nearai" ? nearApiKey() : undefined,
         zdrEnforced: currentProviderId === "openrouter" && enforceOpenRouterZdr,

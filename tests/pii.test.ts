@@ -19,6 +19,12 @@ test("detects a formatted phone number but not a bare digit run", () => {
   assert.equal(detectPii("order 4155552671000").some((h) => h.type === "phone"), false);
 });
 
+test("IBAN requires a valid mod-97 checksum; MAC by format", () => {
+  assert.ok(detectPii("account GB82WEST12345698765432 please").some((h) => h.type === "iban"));
+  assert.equal(detectPii("code GB00WEST12345698765432").some((h) => h.type === "iban"), false); // bad checksum
+  assert.ok(detectPii("device 00:1A:2B:3C:4D:5E").some((h) => h.type === "mac"));
+});
+
 test("clean text has no PII", () => {
   assert.equal(hasPii("refactor the auth module and add tests"), false);
   assert.deepEqual(detectPii(""), []);

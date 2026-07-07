@@ -11,9 +11,11 @@ const PLACEHOLDER: Record<PiiType, string> = {
   ssn: "«ssn»",
   "credit-card": "«card»",
   ip: "«ip»",
+  iban: "«iban»",
+  mac: "«mac»",
 };
 
-export type PiiType = "email" | "phone" | "ssn" | "credit-card" | "ip";
+export type PiiType = "email" | "phone" | "ssn" | "credit-card" | "ip" | "iban" | "mac";
 
 // Order matters: run more-specific/structured patterns first so a card isn't also
 // counted as a phone. Credit-card + phone are validated further below.
@@ -25,6 +27,11 @@ const PATTERNS: { type: PiiType; re: RegExp; validate?: (m: string) => boolean }
   { type: "credit-card", re: /\b(?:\d[ -]?){13,19}\b/g, validate: luhn },
   // IPv4 with each octet 0–255.
   { type: "ip", re: /\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b/g },
+  // IBAN: 2-letter country + 2 check digits + 11–30 alphanumerics, mod-97 validated
+  // (cuts false positives on random alphanumeric runs sharply).
+  { type: "iban", re: /\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b/g, validate: ibanValid },
+  // MAC address (colon or dash separated).
+  { type: "mac", re: /\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b/g },
   // North-American / international-ish phone. Deliberately last + conservative to
   // avoid eating IDs; requires a plausible separator or leading +.
   { type: "phone", re: /(?:\+\d{1,3}[\s.-]?)?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}\b/g },
@@ -45,6 +52,20 @@ function luhn(s: string): boolean {
     alt = !alt;
   }
   return sum % 10 === 0;
+}
+
+// IBAN mod-97 check (ISO 13616): move the first 4 chars to the end, map letters to
+// numbers (A=10…Z=35), and verify the big-integer mod 97 === 1.
+function ibanValid(s: string): boolean {
+  const iban = s.toUpperCase();
+  if (iban.length < 15 || iban.length > 34) return false;
+  const rearranged = iban.slice(4) + iban.slice(0, 4);
+  let remainder = 0;
+  for (const ch of rearranged) {
+    const code = ch >= "A" && ch <= "Z" ? (ch.charCodeAt(0) - 55).toString() : ch;
+    for (const d of code) remainder = (remainder * 10 + (d.charCodeAt(0) - 48)) % 97;
+  }
+  return remainder === 1;
 }
 
 export interface PiiHit {
@@ -87,6 +108,8 @@ export function summarizePii(hits: PiiHit[]): string {
     ssn: ["SSN", "SSNs"],
     "credit-card": ["card number", "card numbers"],
     ip: ["IP address", "IP addresses"],
+    iban: ["IBAN", "IBANs"],
+    mac: ["MAC address", "MAC addresses"],
   };
   return hits.map((h) => `${h.count} ${label[h.type][h.count === 1 ? 0 : 1]}`).join(", ");
 }
