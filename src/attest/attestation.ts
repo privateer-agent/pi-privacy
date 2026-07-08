@@ -115,7 +115,12 @@ export function interpretReport(modelId: string, nonce: string, raw: unknown): A
   const hardware: string[] = [];
   if (/nvidia|gpu/.test(blob)) hardware.push("NVIDIA");
   if (/intel|tdx/.test(blob)) hardware.push("Intel TDX");
-  const nonceEchoed = blob.includes(nonce.toLowerCase());
+  // Freshness/anti-replay: our nonce must appear in the report. Require a non-trivial
+  // nonce — a real attestation nonce is 32 bytes (64 hex, see randomNonce). Guard
+  // against an empty/short nonce, since blob.includes("") is vacuously true and would
+  // score a missing nonce as "echoed" (matters when the nonce is externally supplied,
+  // e.g. a server-proxied report rather than one bound to our own randomNonce).
+  const nonceEchoed = nonce.length >= 16 && blob.includes(nonce.toLowerCase());
 
   return { model: modelId, nonce, signingAddress, nonceEchoed, hardware, raw };
 }

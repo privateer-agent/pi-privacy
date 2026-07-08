@@ -63,13 +63,23 @@ test("tinfoil: empty document → red", () => {
 });
 
 test("near: signing key + hardware + nonce echo → green", () => {
-  const nonce = "abc123";
+  const nonce = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"; // 64-hex, like randomNonce
   const raw = { signing_address: "0xdeadbeef", gpu: "NVIDIA H100", quote: `...${nonce}...` };
   const att = interpretReport("model-x", nonce, raw);
   assert.equal(att.signingAddress, "0xdeadbeef");
   assert.deepEqual(att.hardware, ["NVIDIA"]);
   assert.equal(att.nonceEchoed, true);
   assert.equal(teePosture(att), "green");
+});
+
+test("near: empty nonce does NOT count as echoed (no vacuous match) → not green", () => {
+  // Regression: blob.includes("") is vacuously true, so an externally-supplied empty
+  // nonce (e.g. a server-proxied report omitting it) would otherwise score green even
+  // with an otherwise-complete report. The length guard must reject it.
+  const raw = { signing_address: "0xdeadbeef", gpu: "NVIDIA H100" };
+  const att = interpretReport("model-x", "", raw);
+  assert.equal(att.nonceEchoed, false);
+  assert.notEqual(teePosture(att), "green"); // signing key + hw but no fresh nonce → yellow
 });
 
 test("near: no material → red", () => {
