@@ -1,6 +1,6 @@
 {
   "name": "pi-privacy",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Privacy posture + TEE attestation for Pi providers: cryptographically verified confidential-enclave (TEE) inference, enforced/labeled zero-data-retention (ZDR), and on-device detection — honestly graded so a verified guarantee never reads like a claimed one.",
   "type": "module",
   "license": "MIT",
@@ -25,7 +25,9 @@
     "sev-snp"
   ],
   "pi": {
-    "extensions": ["./extensions"]
+    "extensions": [
+      "./extensions"
+    ]
   },
   "exports": {
     ".": "./src/index.ts",
@@ -54,8 +56,12 @@
     "@earendil-works/pi-ai": ">=0.80.0"
   },
   "peerDependenciesMeta": {
-    "@earendil-works/pi-coding-agent": { "optional": true },
-    "@earendil-works/pi-ai": { "optional": true }
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-ai": {
+      "optional": true
+    }
   },
   "dependencies": {
     "undici": "^7.28.0"
