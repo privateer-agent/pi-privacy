@@ -43,6 +43,7 @@ them look the same.
 | `nearai` | Verified TEE | Attestation report (Intel TDX + NVIDIA CC) fetched over HTTPS, bound to a fresh nonce |
 | `openrouter` | ZDR (posture-aware) | `zdr-policy` until enforcement pins routing → `zdr-enforced` |
 | `venice`, `fireworks` | ZDR (by policy) | Provider policy; honest limits noted (e.g. Venice is not TEE-attested) |
+| `privateer-api` | ZDR (by policy) | Privateer developer key (`sk-priv-…`); server-proxied inference — the proxy mediates attestation, so it's a zero-retention *policy*, not a client-verified enclave |
 | `ollama`, `custom` | On-device | Detected when the endpoint is a loopback URL |
 
 Providers with no verifiable or default privacy channel (Together, DeepSeek, MiniMax,

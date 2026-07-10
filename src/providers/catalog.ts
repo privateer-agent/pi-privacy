@@ -81,6 +81,19 @@ export const PRIVACY_PROVIDERS: PrivacyProvider[] = [
     note: "fireworks.ai → API Keys (open models: zero retention by default, not TEE-attested; Fireworks's own f1/FireFunction may log).",
   },
   {
+    id: "privateer-api",
+    label: "Privateer (developer API)",
+    tier: "zdr-policy",
+    baseUrl: "https://api.privateer.pro/v1",
+    api: "openai-completions",
+    keyEnv: "${PRIVATEER_API_KEY}",
+    // Honest copy: a server-proxied developer key (sk-priv-…). Privateer asserts
+    // zero retention, but the proxy mediates attestation — a pi client can't verify
+    // the underlying enclave end-to-end through it — so this is POLICY, not a
+    // client-verified TEE. (Verified-TEE access is the in-app account channel's job.)
+    note: "privateer.pro → API keys (sk-priv-…). Server-proxied, zero-retention by policy; NOT TEE-attested end-to-end (the proxy mediates attestation).",
+  },
+  {
     id: "openrouter",
     label: "OpenRouter",
     tier: "zdr-enforced", // ceiling; posture-aware — see postureAware

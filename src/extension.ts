@@ -70,8 +70,9 @@ export interface PiPrivacyOptions {
   // Install the process-wide attestation dispatcher (default true). Set false if the
   // host already installed one (e.g. privateer-agent's boot.ts).
   installDispatcher?: boolean;
-  // Register the config-only privacy providers (tinfoil/nearai/venice/ollama) with
-  // seed models (default true). Built-in providers (openrouter/fireworks) are left
+  // Register the config-only privacy providers (tinfoil/nearai/venice/ollama/
+  // privateer-api) with seed models (default true). Built-in providers
+  // (openrouter/fireworks) are left
   // to Pi so their model listings aren't clobbered.
   registerProviders?: boolean;
   // Enforce OpenRouter ZDR routing (default false — opt-in, since a model with no
@@ -103,6 +104,7 @@ const SEED_MODELS: Record<string, string> = {
   nearai: "zai-org/GLM-5.1-FP8",
   venice: "qwen3-coder-480b-a35b-instruct-turbo",
   ollama: "llama3.1",
+  "privateer-api": "near/zai-org/GLM-5.1-FP8",
 };
 
 function registerable(p: PrivacyProvider): boolean {
