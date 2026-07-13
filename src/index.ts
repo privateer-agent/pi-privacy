@@ -61,18 +61,29 @@ export {
 
 export {
   type PiPrivacyOptions,
+  type BadgeSink,
   makePiPrivacyExtension,
   default as piPrivacyExtension,
 } from "./extension.ts";
 
 export { veniceRequestPatch, openRouterZdrPatch } from "./ext/patches.ts";
 
-// Local structured-PII detection (best-effort; emails/phones/SSNs/cards/IPs).
+// Tool-exfiltration assessor (pure): is a tool call an egress channel, and where to.
+export {
+  type ToolAssessment,
+  assessToolCall,
+  firstRemoteUrl,
+} from "./ext/toolgate.ts";
+
+// Local structured-PII + secret detection (best-effort; emails/phones/SSNs/cards/IPs,
+// API keys/tokens/private keys).
 export {
   type PiiType,
   type PiiHit,
+  SECRET_TYPES,
   detectPii,
   hasPii,
+  hasSecrets,
   redactPii,
   summarizePii,
 } from "./pii/detect.ts";

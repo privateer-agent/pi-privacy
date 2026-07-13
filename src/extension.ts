@@ -12,7 +12,8 @@ import { PRIVACY_PROVIDERS, type PrivacyProvider } from "./providers/catalog.ts"
 import { veniceRequestPatch, openRouterZdrPatch } from "./ext/patches.ts";
 import { verifyModelPosture, type PostureResult } from "./posture/verify.ts";
 import { TIERS, type PrivacyTier } from "./posture/tiers.ts";
-import { detectPii, redactPii, summarizePii } from "./pii/detect.ts";
+import { detectPii, redactPii, summarizePii, hasSecrets } from "./pii/detect.ts";
+import { assessToolCall } from "./ext/toolgate.ts";
 
 // Verified-private tiers where PII needs no gate: an attested enclave can't read it,
 // and a loopback endpoint never sends it. NOTE zdr-* is NOT here — a ZDR provider
@@ -55,6 +56,13 @@ interface PiCtx {
   ui?: {
     notify?: (message: string, level?: string) => void;
     select?: (title: string, options: string[], opts?: unknown) => Promise<string | undefined>;
+    // Badge render surfaces, in descending preference. Present on event contexts (not
+    // the restricted command context), and each host UI/mode may expose a different
+    // subset — so every one is feature-detected before use and the badge walks a
+    // fallback chain (see badgeSinks) rather than depending on any single method.
+    setStatus?: (key: string, text: string | undefined) => void;
+    setWidget?: (key: string, content: string[] | undefined, options?: unknown) => void;
+    setTitle?: (title: string) => void;
   };
 }
 interface PiExtensionApiLike {
@@ -93,8 +101,32 @@ export interface PiPrivacyOptions {
   // interactively warn + offer redact before sending PII down an UNVERIFIED channel;
   // "redact": silently mask; "off": disabled. Only acts below verified-TEE/local
   // (an attested/on-device channel is safe), and only where a UI can prompt. Detection
-  // is best-effort structured PII (emails/phones/SSNs/cards/IPs) — NOT a guarantee.
+  // is best-effort structured PII + secrets (emails/phones/SSNs/cards/IPs, API keys/
+  // tokens/private keys) — NOT a guarantee.
   piiPolicy?: "warn" | "redact" | "off";
+  // Show the live posture badge (default true). Updates on model switch + each request
+  // so "verified vs asserted" is always glanceable, never on-demand-only.
+  showBadge?: boolean;
+  // Ordered fallback chain of UI surfaces for the badge. The FIRST one the current UI
+  // actually exposes is used, so the badge still renders across host UIs/modes that
+  // support different methods (not every context has setStatus). Default:
+  // ["status","widget","title"] — the non-intrusive surfaces first, title as a
+  // broad-reach last resort. Add "notify" to also surface changes as messages.
+  badgeSinks?: BadgeSink[];
+  // The key the badge writes under (setStatus/setWidget are keyed) so a host can
+  // namespace or replace it. Default "pi-privacy".
+  badgeKey?: string;
+  // Fully custom badge renderer — overrides the sink chain entirely. Receives the
+  // computed badge text, the tier, and the current context. Use to route the badge
+  // anywhere (a custom widget, an external status line, telemetry).
+  renderBadge?: (badge: string, tier: PrivacyTier | undefined, ctx: PiCtx) => void;
+  // Guard PII/secrets leaving the machine via a TOOL call (bash curl, web-fetch, an
+  // MCP tool, …) — ORTHOGONAL to model posture (a TEE/ZDR model doesn't stop a tool
+  // exfiltrating data to a third party). "warn" (default): interactively confirm
+  // before an egress tool call carrying PII/secrets; "block": always block such calls;
+  // "off": disabled. In warn mode with no UI, a CREDENTIAL leak is blocked (loud +
+  // safe) while mere PII is allowed with a notice.
+  toolExfilPolicy?: "warn" | "block" | "off";
 }
 
 // Config-only providers Pi doesn't ship: register these. Built-ins + custom skipped.
@@ -109,6 +141,51 @@ const SEED_MODELS: Record<string, string> = {
 
 function registerable(p: PrivacyProvider): boolean {
   return !!p.baseUrl && !BUILTIN.has(p.id) && p.id !== "custom";
+}
+
+// The status-bar badge for a tier. A glyph keyed off the traffic-light posture keeps
+// verified (green 🛡) visibly distinct from asserted (yellow ⚠) and standard (• none)
+// — the whole verified-vs-claimed thesis, made glanceable. `undefined` tier (not yet
+// computed) shows a neutral pending marker rather than overclaiming a ceiling.
+function postureBadge(tier: PrivacyTier | undefined): string {
+  if (!tier) return "⋯ checking privacy";
+  const info = TIERS[tier];
+  const glyph =
+    info.posture === "green" ? "🛡" : info.posture === "yellow" ? "⚠" : info.posture === "red" ? "⛔" : "•";
+  return `${glyph} ${info.label}`;
+}
+
+// A UI surface the badge can render to. `status` (footer) and `widget` (line above
+// the editor) are dedicated extension surfaces that don't disturb other UI; `title`
+// replaces the session title (a broad-reach last resort); `notify` fires a message
+// (used only on change, since paintBadge de-dupes). The badge walks the configured
+// chain and renders to the FIRST surface the current UI actually exposes.
+export type BadgeSink = "status" | "widget" | "title" | "notify";
+
+function renderBadgeTo(
+  ui: NonNullable<PiCtx["ui"]>,
+  sink: BadgeSink,
+  key: string,
+  badge: string,
+  tier: PrivacyTier | undefined,
+): boolean {
+  switch (sink) {
+    case "status":
+      if (typeof ui.setStatus === "function") return ui.setStatus(key, badge), true;
+      return false;
+    case "widget":
+      if (typeof ui.setWidget === "function") return ui.setWidget(key, [badge]), true;
+      return false;
+    case "title":
+      if (typeof ui.setTitle === "function") return ui.setTitle(badge), true;
+      return false;
+    case "notify":
+      if (typeof ui.notify === "function")
+        return ui.notify(badge, TIERS[tier ?? "standard"].posture === "green" ? "info" : "warning"), true;
+      return false;
+    default:
+      return false;
+  }
 }
 
 function providerConfig(p: PrivacyProvider): unknown {
@@ -152,6 +229,11 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
     onPosture,
     useDispatcherTransport = true,
     piiPolicy = "warn",
+    showBadge = true,
+    badgeSinks = ["status", "widget", "title"],
+    badgeKey = "pi-privacy",
+    renderBadge,
+    toolExfilPolicy = "warn",
     resolveTier,
   } = opts;
 
@@ -171,6 +253,35 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
     let currentTier: PrivacyTier | undefined;
     // Session PII decision so we don't re-prompt every turn once the user has chosen.
     let piiChoice: "ask" | "send" | "redact" = "ask";
+    // Session decision for the tool-exfil gate (allow egress with sensitive data).
+    let toolAllow = false;
+
+    // The latest UI surface we've seen — captured from event contexts (the command
+    // context is restricted), so refreshPosture() can paint the badge even though
+    // model_select fires it without threading ctx through. `lastBadge` de-dupes so an
+    // unchanged posture never re-renders (keeps a "notify" sink from spamming).
+    let lastUi: NonNullable<PiCtx["ui"]> | undefined;
+    let lastCtx: PiCtx | undefined;
+    let lastBadge: string | undefined;
+    const captureUi = (ctx: PiCtx | undefined) => {
+      if (ctx?.ui) ((lastUi = ctx.ui), (lastCtx = ctx));
+    };
+    const paintBadge = () => {
+      if (!showBadge || !lastUi) return;
+      const badge = postureBadge(currentTier);
+      if (badge === lastBadge) return; // unchanged → no-op
+      let rendered = false;
+      if (renderBadge) ((renderBadge(badge, currentTier, lastCtx!)), (rendered = true));
+      else {
+        for (const sink of badgeSinks) {
+          if (renderBadgeTo(lastUi, sink, badgeKey, badge, currentTier)) {
+            rendered = true;
+            break;
+          }
+        }
+      }
+      if (rendered) lastBadge = badge; // only commit once something actually drew it
+    };
 
     // Recompute posture for the current model; cache the tier and publish the badge.
     const refreshPosture = async () => {
@@ -182,6 +293,7 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
         if (t !== undefined) {
           currentTier = t;
           onPosture?.({ providerId: currentProviderId, modelId: currentModelId, tier: t });
+          paintBadge();
           return;
         }
       }
@@ -192,17 +304,23 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
       });
       currentTier = result.tier;
       onPosture?.(result);
+      paintBadge();
     };
 
-    pi.on("model_select", (event) => {
+    pi.on("model_select", (event, ctx) => {
       const model = event?.model as PiModel | undefined;
       currentProviderId = model?.provider;
       currentModelId = model?.id;
+      captureUi(ctx);
+      currentTier = undefined; // don't show the old model's badge while re-verifying
+      paintBadge(); // pending marker until attestation resolves
       void refreshPosture();
     });
 
     // Per-provider request patches + the posture-aware PII gate.
     pi.on("before_provider_request", async (event, ctx) => {
+      captureUi(ctx); // keep the badge alive even if model_select had no UI
+      paintBadge();
       let payload = event?.payload;
       // Provider-specific patches first (scoped to the current provider).
       if (currentProviderId === "venice") payload = veniceRequestPatch(payload);
@@ -217,9 +335,10 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
             piiChoice !== "ask" ? piiChoice : piiPolicy === "redact" ? "redact" : "send";
           if (piiChoice === "ask" && piiPolicy === "warn" && ctx?.hasUI && typeof ctx.ui?.select === "function") {
             const tierLabel = TIERS[currentTier ?? "standard"].label;
+            const kind = hasSecrets(hits) ? "secrets/PII" : "structured PII";
             const choice = await ctx.ui.select(
               `⚠ ${summarizePii(hits)} detected — sending to an unverified channel (${tierLabel}). ` +
-                `Best-effort structured-PII detection only, not a guarantee.`,
+                `Best-effort ${kind} detection only, not a guarantee.`,
               ["Send as-is", "Redact PII", "Redact + remember for session", "Send + remember for session"],
             );
             if (choice === "Redact PII") action = "redact";
@@ -232,6 +351,50 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
       }
 
       return payload === event?.payload ? undefined : payload;
+    });
+
+    // Tool-exfil gate: warn/block PII or secrets about to leave the machine via a TOOL
+    // call. Deliberately INDEPENDENT of the model's tier — a verified-TEE or ZDR model
+    // does nothing to stop a bash/web tool shipping data to a third party. Best-effort
+    // egress + structured-detection heuristic, never a guarantee.
+    pi.on("tool_call", async (event, ctx) => {
+      if (toolExfilPolicy === "off") return;
+      captureUi(ctx);
+      const assessment = assessToolCall(event?.toolName, event?.input);
+      if (!assessment.egress) return;
+
+      const hits = detectPii(payloadText(event?.input));
+      if (hits.length === 0) return;
+
+      const secret = hasSecrets(hits);
+      const dest = assessment.target ? ` → ${assessment.target}` : "";
+      const summary = summarizePii(hits);
+      const reason = `pi-privacy blocked ${secret ? "credential" : "PII"} exfiltration via ${event?.toolName}`;
+      const warning =
+        `⚠ ${event?.toolName} is about to send ${summary} off this machine${dest}. ` +
+        `A private (TEE/ZDR) model does NOT protect a tool call. Best-effort detection, not a guarantee.`;
+
+      // Already allowed this session → just remind and let it through.
+      if (toolAllow) {
+        ctx?.ui?.notify?.(warning, "warning");
+        return;
+      }
+      if (toolExfilPolicy === "block") return { block: true, reason };
+
+      // warn: prompt where we can.
+      if (ctx?.hasUI && typeof ctx.ui?.select === "function") {
+        const choice = await ctx.ui.select(warning, ["Block", "Allow once", "Allow for session"]);
+        if (choice === "Allow for session") ((toolAllow = true), undefined);
+        else if (choice === "Allow once") return;
+        else if (choice === "Block" || choice === undefined) return { block: true, reason };
+        return;
+      }
+
+      // No UI (print/JSON, automated): block a credential leak (loud + safe); allow
+      // mere PII with a notice so non-interactive runs aren't silently broken.
+      if (secret) return { block: true, reason };
+      ctx?.ui?.notify?.(warning, "warning");
+      return;
     });
 
     if (typeof pi.registerCommand === "function") {
