@@ -12,8 +12,10 @@ import { PRIVACY_PROVIDERS, type PrivacyProvider } from "./providers/catalog.ts"
 import { veniceRequestPatch, openRouterZdrPatch } from "./ext/patches.ts";
 import { verifyModelPosture, type PostureResult } from "./posture/verify.ts";
 import { TIERS, type PrivacyTier } from "./posture/tiers.ts";
-import { detectPii, redactPii, summarizePii, hasSecrets } from "./pii/detect.ts";
+import { effectiveTier } from "./posture/effective.ts";
+import { detectPii, redactPii, summarizePii, hasSecrets, type PiiHit } from "./pii/detect.ts";
 import { assessToolCall } from "./ext/toolgate.ts";
+import { assessDowngrade, downgradeWarning } from "./posture/downgrade.ts";
 
 // Verified-private tiers where PII needs no gate: an attested enclave can't read it,
 // and a loopback endpoint never sends it. NOTE zdr-* is NOT here — a ZDR provider
@@ -67,6 +69,9 @@ interface PiCtx {
 }
 interface PiExtensionApiLike {
   registerProvider?(name: string, config: unknown): void;
+  // Used by the downgrade guard to REVERT a model switch the user declines. Feature
+  // -detected: without it the guard degrades to a warning.
+  setModel?(model: unknown): boolean | Promise<boolean>;
   registerCommand?(
     name: string,
     options: { description?: string; handler: (args: unknown, ctx: PiCtx) => unknown },
@@ -127,6 +132,15 @@ export interface PiPrivacyOptions {
   // "off": disabled. In warn mode with no UI, a CREDENTIAL leak is blocked (loud +
   // safe) while mere PII is allowed with a notice.
   toolExfilPolicy?: "warn" | "block" | "off";
+  // Guard against a POSTURE DOWNGRADE: switching to a weaker-tier model re-sends the
+  // whole accumulated session history — everything the private channel was
+  // protecting — to the new provider on the very next turn. No per-request gate can
+  // see this, because nothing about the request changed; only the transition reveals
+  // it. "warn" (default): prompt when the tier drops and the context is known to
+  // carry PII/secrets, offering to revert the switch; "block": always revert such a
+  // switch; "off": disabled. With no UI, a downgrade carrying CREDENTIALS is
+  // reverted (mirroring the tool gate's loud-and-safe default), mere PII notified.
+  downgradePolicy?: "warn" | "block" | "off";
 }
 
 // Config-only providers Pi doesn't ship: register these. Built-ins + custom skipped.
@@ -234,6 +248,7 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
     badgeKey = "pi-privacy",
     renderBadge,
     toolExfilPolicy = "warn",
+    downgradePolicy = "warn",
     resolveTier,
   } = opts;
 
@@ -256,6 +271,21 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
     // Session decision for the tool-exfil gate (allow egress with sensitive data).
     let toolAllow = false;
 
+    // ── downgrade-guard state ────────────────────────────────────────────────
+    // The tier the accumulated context was protected by at the moment of the last
+    // switch, and the model to hand back to pi.setModel() if the user declines.
+    let previousTier: PrivacyTier | undefined;
+    let previousModel: unknown;
+    // One prompt per transition: the guard runs twice (on the switch, using the new
+    // model's ceiling, then again once attestation resolves the real tier, which can
+    // only be lower). This latches after the first one that actually fires.
+    let downgradeHandled = true;
+    // What the last outbound payload was known to carry. Cached on EVERY request —
+    // including verified-private ones, where the PII gate itself is skipped —
+    // precisely so the guard knows what a private session accumulated before the
+    // switch. Scanning is local, deterministic, and a few ms even on a full context.
+    let contextHits: PiiHit[] = [];
+
     // The latest UI surface we've seen — captured from event contexts (the command
     // context is restricted), so refreshPosture() can paint the badge even though
     // model_select fires it without threading ctx through. `lastBadge` de-dupes so an
@@ -263,8 +293,13 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
     let lastUi: NonNullable<PiCtx["ui"]> | undefined;
     let lastCtx: PiCtx | undefined;
     let lastBadge: string | undefined;
+    // Whether the host can actually prompt. Captured alongside the UI because
+    // guards that run detached from an event (the downgrade guard's second pass,
+    // after attestation resolves) have no ctx of their own — and treating a TUI as
+    // non-interactive would silently apply the no-UI fallback instead of asking.
+    let lastHasUI = false;
     const captureUi = (ctx: PiCtx | undefined) => {
-      if (ctx?.ui) ((lastUi = ctx.ui), (lastCtx = ctx));
+      if (ctx?.ui) ((lastUi = ctx.ui), (lastCtx = ctx), (lastHasUI = !!ctx.hasUI));
     };
     const paintBadge = () => {
       if (!showBadge || !lastUi) return;
@@ -294,6 +329,7 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
           currentTier = t;
           onPosture?.({ providerId: currentProviderId, modelId: currentModelId, tier: t });
           paintBadge();
+          void guardDowngrade(t);
           return;
         }
       }
@@ -305,15 +341,79 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
       currentTier = result.tier;
       onPosture?.(result);
       paintBadge();
+      // Re-check with the VERIFIED tier: a model whose ceiling looked fine can land
+      // lower (attestation failed → tee-unverified), and that's still a downgrade.
+      void guardDowngrade(result.tier);
+    };
+
+    // The posture-downgrade guard. Runs on a model switch and again once attestation
+    // resolves, because the incoming tier can only get WORSE than its ceiling.
+    // Fires only when the tier actually drops AND the context is known to carry
+    // sensitive material — a bare tier change is what the badge is for.
+    const guardDowngrade = async (toTier: PrivacyTier | undefined, ctx?: PiCtx) => {
+      if (downgradePolicy === "off" || downgradeHandled) return;
+      const a = assessDowngrade(previousTier, toTier, contextHits);
+      if (!a.downgrade || a.severity === "none") return;
+      downgradeHandled = true; // one prompt per transition
+
+      const label = currentProviderId
+        ? `${currentProviderId}${currentModelId ? `/${currentModelId}` : ""}`
+        : undefined;
+      const warning = downgradeWarning(a, contextHits, label);
+      const revert = async () => {
+        if (previousModel === undefined || typeof pi.setModel !== "function") {
+          // Nothing to revert to (or the host can't switch) — say so rather than
+          // implying the session was protected.
+          (ctx?.ui ?? lastUi)?.notify?.(`${warning} Could not revert the switch automatically.`, "warning");
+          return;
+        }
+        await pi.setModel(previousModel);
+        (ctx?.ui ?? lastUi)?.notify?.(`Reverted to ${TIERS[a.from].label} — session context stays put.`, "info");
+      };
+
+      if (downgradePolicy === "block") return revert();
+
+      const ui = ctx?.ui ?? lastUi;
+      if ((ctx?.hasUI ?? lastHasUI) && typeof ui?.select === "function") {
+        const choice = await ui.select(warning, [
+          "Stay on the previous model",
+          "Switch anyway",
+          "Switch, redacting PII from now on",
+        ]);
+        if (choice === "Switch anyway") return;
+        if (choice === "Switch, redacting PII from now on") {
+          piiChoice = "redact";
+          return;
+        }
+        return revert(); // explicit "Stay", or cancelled → the safe default
+      }
+
+      // No UI (print/JSON, automated): mirror the tool gate — a CREDENTIAL following
+      // the session downhill is reverted (loud + safe), mere PII passes with a notice.
+      if (a.severity === "secret") return revert();
+      ui?.notify?.(warning, "warning");
     };
 
     pi.on("model_select", (event, ctx) => {
       const model = event?.model as PiModel | undefined;
+      // Snapshot what the context was protected by BEFORE overwriting it — that's
+      // the ceiling the accumulated history was written under.
+      previousTier = currentTier;
+      previousModel = event?.previousModel;
+      downgradeHandled = false; // arm the guard for this transition
       currentProviderId = model?.provider;
       currentModelId = model?.id;
       captureUi(ctx);
       currentTier = undefined; // don't show the old model's badge while re-verifying
       paintBadge(); // pending marker until attestation resolves
+      // Check against the incoming model's CEILING immediately, so the warning lands
+      // before a turn can start; refreshPosture() re-checks with the verified tier.
+      void guardDowngrade(
+        effectiveTier(currentProviderId ?? "", {
+          zdrEnforced: currentProviderId === "openrouter" && enforceOpenRouterZdr,
+        }),
+        ctx,
+      );
       void refreshPosture();
     });
 
@@ -326,10 +426,17 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
       if (currentProviderId === "venice") payload = veniceRequestPatch(payload);
       else if (currentProviderId === "openrouter" && enforceOpenRouterZdr) payload = openRouterZdrPatch(payload);
 
+      // Scan the outbound payload — the full context that would be re-sent — and
+      // cache the result for the downgrade guard. Done for EVERY tier, including
+      // verified-private ones where the gate below is skipped: knowing what a
+      // private session accumulated is the whole basis for guarding the switch out
+      // of it. (Local + deterministic; a few ms on a full context.)
+      const hits = detectPii(payloadText(payload));
+      contextHits = hits;
+
       // PII gate: only below a VERIFIED-private tier (TEE-verified/local are safe —
       // the provider can't read the data), and only where we can actually prompt.
       if (piiPolicy !== "off" && !isVerifiedPrivate(currentTier)) {
-        const hits = detectPii(payloadText(payload));
         if (hits.length > 0) {
           let action: "send" | "redact" =
             piiChoice !== "ask" ? piiChoice : piiPolicy === "redact" ? "redact" : "send";
@@ -414,6 +521,20 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
           const detail = res.teePosture ? ` [${res.teePosture}]` : "";
           const err = res.error ? ` — ${res.error}` : "";
           ctx.ui?.notify?.(`${info.label}${detail}: ${info.blurb}${err}`, "info");
+          // Then the EVIDENCE. The checks here are pragmatic ones suited to an
+          // interactive agent, not a full verifier — so the report that produced
+          // the verdict has to be inspectable, or "verified" is just our word for
+          // it. Emitting it is what lets a user take the same bytes to
+          // nearai/cloud-verifier or tinfoil-cli and check our work.
+          if (res.attestation !== undefined) {
+            let report: string;
+            try {
+              report = JSON.stringify(res.attestation, null, 2);
+            } catch {
+              report = String(res.attestation); // never let display kill /verify
+            }
+            ctx.ui?.notify?.(`attestation report (verify independently):\n${report}`, "info");
+          }
         },
       });
     }

@@ -52,6 +52,15 @@ export {
 
 export { effectiveTier } from "./posture/effective.ts";
 
+// Posture-downgrade assessment: does switching models lower the ceiling over
+// context already known to carry sensitive material?
+export {
+  type DowngradeAssessment,
+  exposureLevel,
+  assessDowngrade,
+  downgradeWarning,
+} from "./posture/downgrade.ts";
+
 // Posture verification (attestation-backed) + the Pi extension entry.
 export {
   type PostureResult,
@@ -73,6 +82,7 @@ export {
   type ToolAssessment,
   assessToolCall,
   firstRemoteUrl,
+  splitCommands,
 } from "./ext/toolgate.ts";
 
 // Local structured-PII + secret detection (best-effort; emails/phones/SSNs/cards/IPs,

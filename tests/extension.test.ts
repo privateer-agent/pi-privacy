@@ -74,15 +74,24 @@ function fakePi() {
   const providers: string[] = [];
   const handlers: Record<string, (e: any, c: any) => any> = {};
   const commands: string[] = [];
+  const commandHandlers: Record<string, (a: any, c: any) => any> = {};
+  const modelSets: unknown[] = [];
   return {
     providers,
     handlers,
     commands,
+    commandHandlers,
+    modelSets,
+    setModel(model: unknown) {
+      modelSets.push(model);
+      return true;
+    },
     registerProvider(name: string) {
       providers.push(name);
     },
-    registerCommand(name: string) {
+    registerCommand(name: string, options?: { handler: (a: any, c: any) => any }) {
       commands.push(name);
+      if (options?.handler) commandHandlers[name] = options.handler;
     },
     on(event: string, handler: (e: any, c: any) => any) {
       handlers[event] = handler;
@@ -270,4 +279,182 @@ test("resolveTier override skips the PII gate on a verified-private tier", async
   const out = await pi.handlers["before_provider_request"]({ payload }, ctx);
   assert.equal(asks.length, 0, "verified-private tier → no PII prompt");
   assert.match(JSON.stringify(out ?? payload), /a@b\.com/, "PII left intact on a TEE channel");
+});
+
+// ── posture-downgrade guard ──────────────────────────────────────────────────
+// The leak no per-request gate can see: a session accumulates secrets under a
+// verified enclave, then a model switch re-sends that whole history to a weaker
+// provider. Nothing about the outgoing request changed — only the ceiling did.
+
+const settle = () => new Promise((r) => setTimeout(r, 0));
+
+// Drive a session up to the moment of a switch: select `from`, send one payload
+// (which is what teaches the guard what the context carries), then switch to `to`.
+async function switchAfterContext(
+  pi: ReturnType<typeof fakePi>,
+  ctx: any,
+  content: string,
+  from = { provider: "tinfoil", id: "m" },
+  to = { provider: "openrouter", id: "gpt-x" },
+) {
+  pi.handlers["model_select"]({ model: from }, ctx);
+  await settle();
+  await pi.handlers["before_provider_request"]({ payload: { messages: [{ role: "user", content }] } }, ctx);
+  pi.handlers["model_select"]({ model: to, previousModel: from }, ctx);
+  await settle();
+}
+
+test("downgrade guard: TEE → standard with secrets in context prompts, and reverts", async () => {
+  const pi = fakePi();
+  const asks: string[] = [];
+  const ctx = {
+    hasUI: true,
+    ui: { select: async (t: string) => (asks.push(t), "Stay on the previous model"), notify: () => {} },
+  };
+  makePiPrivacyExtension({
+    installDispatcher: false,
+    piiPolicy: "off",
+    resolveTier: (p: string) => (p === "tinfoil" ? "tee-verified" : undefined),
+  })(pi as any);
+
+  await switchAfterContext(pi, ctx, "deploy key ghp_1234567890abcdefghijklmnopqrstuvwxyz");
+  assert.equal(asks.length, 1, "prompted once on the transition");
+  assert.match(asks[0], /Verified TEE → ZDR \(by policy\)/);
+  assert.match(asks[0], /GitHub token/, "names what the context carries");
+  assert.deepEqual(pi.modelSets, [{ provider: "tinfoil", id: "m" }], "reverted to the previous model");
+});
+
+test("downgrade guard: stays quiet when the context carries nothing sensitive", async () => {
+  const pi = fakePi();
+  const asks: string[] = [];
+  const ctx = { hasUI: true, ui: { select: async (t: string) => (asks.push(t), "Block"), notify: () => {} } };
+  makePiPrivacyExtension({
+    installDispatcher: false,
+    piiPolicy: "off",
+    resolveTier: (p: string) => (p === "tinfoil" ? "tee-verified" : undefined),
+  })(pi as any);
+
+  await switchAfterContext(pi, ctx, "please refactor this loop");
+  assert.equal(asks.length, 0, "a bare tier change is what the badge is for, not a modal");
+  assert.deepEqual(pi.modelSets, []);
+});
+
+test("downgrade guard: TEE → on-device is not a downgrade", async () => {
+  const pi = fakePi();
+  const asks: string[] = [];
+  const ctx = { hasUI: true, ui: { select: async (t: string) => (asks.push(t), "Block"), notify: () => {} } };
+  makePiPrivacyExtension({
+    installDispatcher: false,
+    piiPolicy: "off",
+    resolveTier: (p: string) => (p === "tinfoil" ? "tee-verified" : undefined),
+  })(pi as any);
+
+  await switchAfterContext(pi, ctx, "key ghp_1234567890abcdefghijklmnopqrstuvwxyz", undefined, {
+    provider: "ollama",
+    id: "llama3.1",
+  });
+  assert.equal(asks.length, 0, "moving to a loopback endpoint exposes nothing new");
+});
+
+test("downgrade guard: 'Switch anyway' proceeds; a later upgrade doesn't re-prompt", async () => {
+  const pi = fakePi();
+  const asks: string[] = [];
+  const ctx = { hasUI: true, ui: { select: async (t: string) => (asks.push(t), "Switch anyway"), notify: () => {} } };
+  makePiPrivacyExtension({
+    installDispatcher: false,
+    piiPolicy: "off",
+    resolveTier: (p: string) => (p === "tinfoil" ? "tee-verified" : undefined),
+  })(pi as any);
+
+  await switchAfterContext(pi, ctx, "key ghp_1234567890abcdefghijklmnopqrstuvwxyz");
+  assert.equal(asks.length, 1);
+  assert.deepEqual(pi.modelSets, [], "not reverted");
+  // Switching back up the ladder is never a downgrade — and must not re-prompt.
+  pi.handlers["model_select"](
+    { model: { provider: "tinfoil", id: "m" }, previousModel: { provider: "openrouter", id: "gpt-x" } },
+    ctx,
+  );
+  await settle();
+  assert.equal(asks.length, 1, "no prompt on an upgrade");
+});
+
+test("downgrade guard: only one prompt per transition (ceiling then verified tier)", async () => {
+  const pi = fakePi();
+  const asks: string[] = [];
+  const ctx = { hasUI: true, ui: { select: async (t: string) => (asks.push(t), "Switch anyway"), notify: () => {} } };
+  // tinfoil → nearai: both ceilings are tee-verified, so the switch-time check is
+  // silent. Attestation for nearai then fails (no key) → tee-unverified, which IS a
+  // downgrade — the guard must catch it on the second pass, exactly once.
+  makePiPrivacyExtension({ installDispatcher: false, piiPolicy: "off",
+    resolveTier: (p: string) => (p === "tinfoil" ? "tee-verified" : undefined) })(pi as any);
+  await switchAfterContext(pi, ctx, "key ghp_1234567890abcdefghijklmnopqrstuvwxyz", undefined, {
+    provider: "nearai",
+    id: "z",
+  });
+  assert.equal(asks.length, 1, "caught after attestation resolved, and only once");
+  assert.match(asks[0], /Verified TEE → TEE \(unconfirmed\)/);
+});
+
+test("downgrade guard: no UI reverts on credentials, notifies on mere PII", async () => {
+  const notes: string[] = [];
+  const ctx = { hasUI: false, ui: { notify: (m: string) => notes.push(m) } };
+  const mk = (pi: any) =>
+    makePiPrivacyExtension({
+      installDispatcher: false,
+      piiPolicy: "off",
+      resolveTier: (p: string) => (p === "tinfoil" ? "tee-verified" : undefined),
+    })(pi);
+
+  const secretPi = fakePi();
+  mk(secretPi);
+  await switchAfterContext(secretPi, ctx, "key ghp_1234567890abcdefghijklmnopqrstuvwxyz");
+  assert.equal(secretPi.modelSets.length, 1, "credential following the session downhill → reverted");
+
+  const piiPi = fakePi();
+  mk(piiPi);
+  await switchAfterContext(piiPi, ctx, "mail a@b.com");
+  assert.deepEqual(piiPi.modelSets, [], "mere PII doesn't break an automated run");
+  assert.ok(notes.some((n) => /Privacy downgrade/.test(n)), "but it is announced");
+});
+
+test("downgradePolicy: 'block' always reverts, 'off' disables the guard", async () => {
+  const asks: string[] = [];
+  const ctx = { hasUI: true, ui: { select: async (t: string) => (asks.push(t), "Switch anyway"), notify: () => {} } };
+
+  const blocked = fakePi();
+  makePiPrivacyExtension({ installDispatcher: false, piiPolicy: "off", downgradePolicy: "block",
+    resolveTier: (p: string) => (p === "tinfoil" ? "tee-verified" : undefined) })(blocked as any);
+  await switchAfterContext(blocked, ctx, "mail a@b.com");
+  assert.equal(asks.length, 0, "block doesn't ask");
+  assert.equal(blocked.modelSets.length, 1, "block reverts");
+
+  const off = fakePi();
+  makePiPrivacyExtension({ installDispatcher: false, piiPolicy: "off", downgradePolicy: "off",
+    resolveTier: (p: string) => (p === "tinfoil" ? "tee-verified" : undefined) })(off as any);
+  await switchAfterContext(off, ctx, "key ghp_1234567890abcdefghijklmnopqrstuvwxyz");
+  assert.equal(asks.length, 0);
+  assert.deepEqual(off.modelSets, []);
+});
+
+// ── /verify output ───────────────────────────────────────────────────────────
+
+test("/verify emits the verdict, and no report line when there is nothing to show", async () => {
+  const pi = fakePi();
+  const notes: string[] = [];
+  const ctx = { hasUI: true, ui: { notify: (m: string) => notes.push(m) } };
+  makePiPrivacyExtension({ installDispatcher: false, piiPolicy: "off" })(pi as any);
+
+  // No model selected → says so, rather than reporting on nothing.
+  await pi.commandHandlers["verify"]({}, ctx);
+  assert.equal(notes.length, 1);
+  assert.match(notes[0], /No model selected/);
+
+  // A non-TEE provider produces no attestation material — the report line must be
+  // absent entirely, not an empty or "undefined" block masquerading as evidence.
+  notes.length = 0;
+  pi.handlers["model_select"]({ model: { provider: "openrouter", id: "m" } }, ctx);
+  await pi.commandHandlers["verify"]({}, ctx);
+  assert.equal(notes.length, 1, "verdict only");
+  assert.match(notes[0], /ZDR \(by policy\)/);
+  assert.ok(!notes.some((n) => /attestation report/.test(n)));
 });
