@@ -25,6 +25,12 @@ export interface PickerModel {
   baseUrl?: string;
 }
 
+// The Privateer verified-TEE capability signal for the picker: the host's account
+// channel can verify a model on select. PER-MODEL because a host may verify some
+// Privateer models (its TEE channel) but not others (its ZDR channel) — a flat `true`
+// would over-label the ZDR ones as "Verifiable TEE". A bare boolean applies uniformly.
+export type VerifiedTeeSignal = boolean | ((model: PickerModel) => boolean);
+
 export interface PickerEntry {
   model: PickerModel;
   // The best tier this model can offer (ceiling) — what it's ranked by. NOT a live
@@ -45,10 +51,14 @@ export interface PickerEntry {
 export function capabilityTier(
   providerId: string | undefined,
   baseUrl: string | undefined,
-  opts: { zdrEnforced?: boolean } = {},
+  opts: { zdrEnforced?: boolean; verifiedTee?: boolean } = {},
 ): PrivacyTier {
   if (isLocalEndpoint(baseUrl)) return "local";
-  return effectiveTier(providerId ?? "", { baseUrl, zdrEnforced: opts.zdrEnforced });
+  return effectiveTier(providerId ?? "", {
+    baseUrl,
+    zdrEnforced: opts.zdrEnforced,
+    verifiedTee: opts.verifiedTee,
+  });
 }
 
 // Picker glyph + label for a capability tier. Deliberately distinct from the live
@@ -76,17 +86,34 @@ function capabilityBadge(tier: PrivacyTier, attestable: boolean): { glyph: strin
 }
 
 // Build a ranked picker entry for one model.
-export function pickerEntry(model: PickerModel, opts: { zdrEnforced?: boolean } = {}): PickerEntry {
+export function pickerEntry(
+  model: PickerModel,
+  opts: { zdrEnforced?: boolean; verifiedTee?: VerifiedTeeSignal } = {},
+): PickerEntry {
   const provider = model.provider;
-  const attestable = !!(provider && PROVIDER_BY_ID[provider]?.attestable);
-  const tier = capabilityTier(provider, model.baseUrl, opts);
+  // Resolve the verified-TEE signal for THIS model (it may be a per-model predicate —
+  // a host verifies some Privateer models but not others).
+  const verifiedTee =
+    typeof opts.verifiedTee === "function" ? !!opts.verifiedTee(model) : !!opts.verifiedTee;
+  // Privateer is attestable ONLY through the in-app account channel — gate its
+  // "Verifiable TEE" label on that per-model signal so the picker never promises
+  // verification the session can't back. Other attestable providers (tinfoil/nearai)
+  // are unconditionally verifiable from their public endpoint.
+  const attestable =
+    provider === "privateer"
+      ? verifiedTee
+      : !!(provider && PROVIDER_BY_ID[provider]?.attestable);
+  const tier = capabilityTier(provider, model.baseUrl, { zdrEnforced: opts.zdrEnforced, verifiedTee });
   const { glyph, label } = capabilityBadge(tier, attestable);
   return { model, capabilityTier: tier, rank: tierRank(tier), glyph, label, attestable };
 }
 
 // Rank a list of models strongest-privacy first. Ties (same tier) break alphabetically
 // by provider then id, so the order is stable and deterministic (no Date/random).
-export function rankModels(models: PickerModel[], opts: { zdrEnforced?: boolean } = {}): PickerEntry[] {
+export function rankModels(
+  models: PickerModel[],
+  opts: { zdrEnforced?: boolean; verifiedTee?: VerifiedTeeSignal } = {},
+): PickerEntry[] {
   return models
     .map((m) => pickerEntry(m, opts))
     .sort(

@@ -41,6 +41,42 @@ test("pickerEntry: attestable TEE shows 'Verifiable' (never live 'Verified')", (
   assert.doesNotMatch(e.label, /^Verified/);
 });
 
+test("pickerEntry: privateer without the account channel is honest ZDR (by policy), not TEE", () => {
+  const e = pickerEntry({ provider: "privateer", id: "near/x", baseUrl: "https://api.privateer.pro/v1" });
+  assert.equal(e.capabilityTier, "zdr-policy");
+  assert.equal(e.attestable, false); // no credential → no "Verifiable TEE" promise
+  assert.equal(e.glyph, "⚠");
+  assert.equal(e.label, "ZDR (by policy)");
+});
+
+test("pickerEntry: privateer WITH the account channel shows Verifiable TEE (verifies on select)", () => {
+  const e = pickerEntry(
+    { provider: "privateer", id: "near/x", baseUrl: "https://api.privateer.pro/v1" },
+    { verifiedTee: true },
+  );
+  assert.equal(e.capabilityTier, "tee-verified");
+  assert.equal(e.attestable, true);
+  assert.equal(e.glyph, "◆"); // hollow marker — capability, never the live solid shield
+  assert.equal(e.label, "Verifiable TEE"); // "Verifiable", not the live "Verified"
+});
+
+test("rankModels: verifiedTee predicate lifts only the TEE-channel Privateer models", () => {
+  // A host verifies its Privateer TEE channel (near/…) but not its ZDR channel — the
+  // per-model predicate must NOT over-label the ZDR model as Verifiable TEE.
+  const models: PickerModel[] = [
+    { provider: "privateer", id: "near/glm", baseUrl: "https://api.privateer.pro/v1" }, // TEE channel
+    { provider: "privateer", id: "some-zdr-model", baseUrl: "https://api.privateer.pro/v1" }, // ZDR channel
+  ];
+  const teeChannel = (m: PickerModel) => (m.id ?? "").startsWith("near/");
+  const byId = Object.fromEntries(
+    rankModels(models, { verifiedTee: teeChannel }).map((e) => [e.model.id, e]),
+  );
+  assert.equal(byId["near/glm"].label, "Verifiable TEE");
+  assert.equal(byId["near/glm"].attestable, true);
+  assert.equal(byId["some-zdr-model"].label, "ZDR (by policy)"); // NOT lifted
+  assert.equal(byId["some-zdr-model"].attestable, false);
+});
+
 test("pickerEntry: on-device shows the solid shield (observable now)", () => {
   const e = pickerEntry({ provider: "ollama", id: "llama", baseUrl: "http://localhost:11434/v1" });
   assert.equal(e.glyph, "🛡");

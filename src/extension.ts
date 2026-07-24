@@ -16,7 +16,7 @@ import { effectiveTier } from "./posture/effective.ts";
 import { detectPii, redactPii, summarizePii, hasSecrets, type PiiHit } from "./pii/detect.ts";
 import { assessToolCall } from "./ext/toolgate.ts";
 import { assessDowngrade, downgradeWarning } from "./posture/downgrade.ts";
-import { rankModels, pickerOptionLabel, type PickerModel } from "./posture/picker.ts";
+import { rankModels, pickerOptionLabel, type PickerModel, type VerifiedTeeSignal } from "./posture/picker.ts";
 
 // Verified-private tiers where PII needs no gate: an attested enclave can't read it,
 // and a loopback endpoint never sends it. NOTE zdr-* is NOT here — a ZDR provider
@@ -96,8 +96,8 @@ export interface PiPrivacyOptions {
   // Install the process-wide attestation dispatcher (default true). Set false if the
   // host already installed one (e.g. privateer-agent's boot.ts).
   installDispatcher?: boolean;
-  // Register the config-only privacy providers (tinfoil/nearai/venice/ollama/
-  // privateer-api) with seed models (default true). Built-in providers
+  // Register the config-only privacy providers (privateer/tinfoil/nearai/venice/
+  // ollama) with seed models (default true). Built-in providers
   // (openrouter/fireworks) are left
   // to Pi so their model listings aren't clobbered.
   registerProviders?: boolean;
@@ -115,6 +115,17 @@ export interface PiPrivacyOptions {
   // private account channel). Return a PrivacyTier to use it (drives the PII gate +
   // badge), or undefined to fall back to pi-privacy's built-in verified posture.
   resolveTier?: (provider: string, modelId: string) => Promise<PrivacyTier | undefined> | PrivacyTier | undefined;
+  // Capability signal for the `/models` picker ONLY: the host's Privateer ACCOUNT
+  // channel can verify a model on select, so Privateer can be shown as "◆ Verifiable
+  // TEE" (verifies on select) instead of its "⚠ ZDR (by policy)" floor. PER-MODEL:
+  // pass a predicate, since a host verifies some Privateer models (its TEE channel) but
+  // not others (its ZDR channel) — e.g. `(m) => loggedIn && privateerChannel(m.id) ===
+  // "tee"`. A bare `true` applies uniformly. This is a CEILING/capability marker, never
+  // a live verdict — the real posture still comes from resolveTier (or verifyModelPosture)
+  // when a model is actually selected. Code-only and NOT settable from zero-code config
+  // on purpose: it lifts a privacy LABEL, so only a host that genuinely operates the
+  // account channel may assert it.
+  privateerVerifiedTee?: VerifiedTeeSignal;
   // Posture-aware structured-PII policy on outbound requests. "warn" (default):
   // interactively warn + offer redact before sending PII down an UNVERIFIED channel;
   // "redact": silently mask; "off": disabled. Only acts below verified-TEE/local
@@ -173,7 +184,7 @@ const SEED_MODELS: Record<string, string> = {
   nearai: "zai-org/GLM-5.1-FP8",
   venice: "qwen3-coder-480b-a35b-instruct-turbo",
   ollama: "llama3.1",
-  "privateer-api": "near/zai-org/GLM-5.1-FP8",
+  privateer: "near/zai-org/GLM-5.1-FP8",
 };
 
 function registerable(p: PrivacyProvider): boolean {
@@ -275,6 +286,7 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
     modelPicker = true,
     modelPickerCommand = "models",
     resolveTier,
+    privateerVerifiedTee = false,
   } = opts;
 
   return function piPrivacy(pi: PiExtensionApiLike): void {
@@ -584,7 +596,10 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
               return;
             }
 
-            const ranked = rankModels(models, { zdrEnforced: enforceOpenRouterZdr });
+            const ranked = rankModels(models, {
+              zdrEnforced: enforceOpenRouterZdr,
+              verifiedTee: privateerVerifiedTee,
+            });
             const cur = ctx.getModel?.() ?? { provider: currentProviderId, id: currentModelId };
             const isCurrent = (m: PickerModel) => m.provider === cur.provider && m.id === cur.id;
 

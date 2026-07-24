@@ -64,6 +64,12 @@ export async function verifyModelPosture(
     }
   }
 
+  // Privateer's VERIFIED-TEE verdict comes from the host's account channel (OAuth
+  // session + private account server + sealed relay — privateer-agent's job), injected
+  // via the extension's resolveTier hook. From pi-privacy alone we only see the public
+  // sk-priv- developer key, which is server-proxied and unverifiable end-to-end, so it
+  // falls through to its honest zdr-policy floor below (never a TEE claim we can't back).
+
   // Non-TEE: static tier + on-device detection + ZDR enforcement state.
   return {
     providerId,

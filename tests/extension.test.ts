@@ -102,7 +102,7 @@ function fakePi() {
 test("extension registers config-only providers, not built-ins", () => {
   const pi = fakePi();
   makePiPrivacyExtension({ installDispatcher: false })(pi as any);
-  assert.deepEqual(pi.providers.sort(), ["nearai", "ollama", "privateer-api", "tinfoil", "venice"]);
+  assert.deepEqual(pi.providers.sort(), ["nearai", "ollama", "privateer", "tinfoil", "venice"]);
   assert.ok(!pi.providers.includes("openrouter")); // built-in, left to Pi
   assert.ok(!pi.providers.includes("fireworks"));
   assert.ok(pi.commands.includes("verify"));

@@ -57,6 +57,7 @@ export { effectiveTier } from "./posture/effective.ts";
 export {
   type PickerModel,
   type PickerEntry,
+  type VerifiedTeeSignal,
   capabilityTier,
   pickerEntry,
   rankModels,

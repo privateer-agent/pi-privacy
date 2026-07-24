@@ -12,13 +12,20 @@ import type { PrivacyTier } from "./tiers.ts";
 // function alone.
 export function effectiveTier(
   providerId: string,
-  opts: { baseUrl?: string; zdrEnforced?: boolean } = {},
+  opts: { baseUrl?: string; zdrEnforced?: boolean; verifiedTee?: boolean } = {},
 ): PrivacyTier {
   const p = PROVIDER_BY_ID[providerId];
   if (!p) return "standard";
   if (p.local || isLocalEndpoint(opts.baseUrl)) return "local";
   if (p.postureAware && p.id === "openrouter") {
     return opts.zdrEnforced ? "zdr-enforced" : "zdr-policy";
+  }
+  // Privateer: the tee-verified ceiling is reachable ONLY through the in-app account
+  // channel. The public developer key (sk-priv-…) is server-proxied — the proxy
+  // mediates attestation, so we can't verify the enclave end-to-end — and floors to
+  // zdr-policy. Never claim tee-verified from the public key alone.
+  if (p.postureAware && p.id === "privateer") {
+    return opts.verifiedTee ? "tee-verified" : "zdr-policy";
   }
   return p.tier;
 }

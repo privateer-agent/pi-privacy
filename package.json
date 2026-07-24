@@ -1,6 +1,6 @@
 {
   "name": "pi-privacy",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Privacy posture + TEE attestation for Pi providers: cryptographically verified confidential-enclave (TEE) inference, enforced/labeled zero-data-retention (ZDR), and on-device detection — honestly graded so a verified guarantee never reads like a claimed one.",
   "type": "module",
   "license": "MIT",

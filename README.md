@@ -90,11 +90,11 @@ them look the same.
 
 | Provider | Tier | How it's checked |
 |---|---|---|
+| `privateer` | Verified TEE → ZDR (by policy) | Posture-aware. The public developer key (`sk-priv-…`) is server-proxied — the proxy mediates attestation, so pi-privacy can't verify the enclave end-to-end and honestly floors it to zero-retention *policy*. **Verified TEE** comes from the in-app **account** channel, which the host (privateer-agent) operates — its own OAuth session + account server + sealed relay — reusing this package's `interpretReport`/`teePosture` and injecting the verdict via `resolveTier` (the picker's ◆ *Verifiable TEE* label is gated on the `privateerVerifiedTee` capability signal) |
 | `tinfoil` | Verified TEE | SEV-SNP attestation; the enclave's TLS key (SPKI) is pinned against the connection Pi actually uses |
 | `nearai` | Verified TEE | Attestation report (Intel TDX + NVIDIA CC) fetched over HTTPS, bound to a fresh nonce |
 | `openrouter` | ZDR (posture-aware) | `zdr-policy` until enforcement pins routing → `zdr-enforced` |
 | `venice`, `fireworks` | ZDR (by policy) | Provider policy; honest limits noted (e.g. Venice is not TEE-attested) |
-| `privateer-api` | ZDR (by policy) | Privateer developer key (`sk-priv-…`); server-proxied inference — the proxy mediates attestation, so it's a zero-retention *policy*, not a client-verified enclave |
 | `ollama`, `custom` | On-device | Detected when the endpoint is a loopback URL |
 
 Providers with no verifiable or default privacy channel (Together, DeepSeek, MiniMax,

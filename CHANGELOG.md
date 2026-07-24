@@ -4,6 +4,34 @@ All notable changes to **pi-privacy** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] — 2026-07-24
+
+### Added
+
+- **Privateer verified-TEE capability seam.** The `/models` picker can show Privateer as
+  **◆ Verifiable TEE** (verifies on select) instead of its **⚠ ZDR (by policy)** floor,
+  gated on a new code-only `makePiPrivacyExtension` option, `privateerVerifiedTee`. It is a
+  ceiling/label lever, never a live verdict (deliberately excluded from zero-code config).
+  **Per-model:** the signal is `boolean | ((model) => boolean)` (new exported type
+  `VerifiedTeeSignal`), so a host can lift only the models its account channel actually
+  verifies — e.g. `(m) => loggedIn && privateerChannel(m.id) === "tee"` — without
+  over-labeling its ZDR-channel models. `effectiveTier` / `capabilityTier` take a plain
+  `verifiedTee` boolean; `pickerEntry` / `rankModels` resolve the predicate per model. The
+  **live** verified verdict continues to come from the host's account channel via the
+  extension's `resolveTier` hook.
+
+### Changed
+
+- **Privateer is now the first provider and posture-aware.** Renamed the `privateer-api`
+  provider to `privateer` (**breaking**: the registered provider id, `PROVIDER_BY_ID` key,
+  and seed-model key all changed) and moved it to the head of the catalog. Its tier now spans the
+  ladder: ceiling **Verified TEE** (the account channel) resolving down to **ZDR (by
+  policy)** for the public developer key. `effectiveTier` floors the public key to
+  `zdr-policy` and never claims `tee-verified` from it alone. pi-privacy does not attest
+  Privateer itself — that belongs to the host (privateer-agent), which owns the OAuth
+  session, account server, and sealed relay and reuses this package's `interpretReport`/
+  `teePosture` primitives.
+
 ## [0.6.0] — 2026-07-24
 
 ### Added
@@ -164,6 +192,7 @@ All notable changes to **pi-privacy** are documented here. The format follows
   NEAR AI (report-body over HTTPS), observable ZDR enforcement for OpenRouter, on-device
   detection for loopback endpoints, and the `/verify` command.
 
+[0.7.0]: https://github.com/privateer-agent/pi-privacy/releases/tag/v0.7.0
 [0.6.0]: https://github.com/privateer-agent/pi-privacy/releases/tag/v0.6.0
 [0.5.0]: https://github.com/privateer-agent/pi-privacy/releases/tag/v0.5.0
 [0.4.0]: https://github.com/privateer-agent/pi-privacy/releases/tag/v0.4.0

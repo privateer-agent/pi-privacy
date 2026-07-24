@@ -19,8 +19,13 @@
 import { readFileSync } from "node:fs";
 import type { PiPrivacyOptions, BadgeSink } from "./extension.ts";
 
-// The subset of options config can set: everything except the function callbacks.
-export type ConfigurableOptions = Omit<PiPrivacyOptions, "onPosture" | "resolveTier" | "renderBadge">;
+// The subset of options config can set: everything except the function callbacks and
+// privateerVerifiedTee (a privacy-LABEL lever — only a host that operates the account
+// channel may assert it, never a config file).
+export type ConfigurableOptions = Omit<
+  PiPrivacyOptions,
+  "onPosture" | "resolveTier" | "renderBadge" | "privateerVerifiedTee"
+>;
 
 const POLICY3 = ["warn", "redact", "off"] as const; // piiPolicy
 const TOOL_POLICY = ["warn", "block", "off"] as const; // toolExfilPolicy
@@ -180,7 +185,7 @@ export function sanitizeConfig(raw: unknown, warn: Warn): ConfigurableOptions {
   }
 
   for (const k of Object.keys(src)) {
-    if (k === "onPosture" || k === "resolveTier" || k === "renderBadge")
+    if (k === "onPosture" || k === "resolveTier" || k === "renderBadge" || k === "privateerVerifiedTee")
       warn(`config.${k} is a code-only option and can't be set from JSON — import makePiPrivacyExtension() to use it.`);
   }
   return opts;

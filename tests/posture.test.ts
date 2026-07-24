@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { TIERS, tierRank, tierFromTeePosture } from "../src/posture/tiers.ts";
-import { effectiveTier, isLocalEndpoint, PROVIDER_BY_ID } from "../src/index.ts";
+import { effectiveTier, isLocalEndpoint, PROVIDER_BY_ID, verifyModelPosture } from "../src/index.ts";
 
 test("only tee-verified is cryptographically verified", () => {
   const crypto = Object.values(TIERS).filter((t) => t.verifiability === "cryptographic");
@@ -80,4 +80,20 @@ test("effectiveTier: TEE providers advertise their ceiling pre-attestation", () 
 
 test("unknown provider is standard", () => {
   assert.equal(effectiveTier("groq"), "standard");
+});
+
+test("effectiveTier: privateer floors to zdr-policy; verifiedTee lifts the ceiling to tee-verified", () => {
+  // Posture-aware, like OpenRouter. The public developer key floors to zdr-policy; the
+  // `verifiedTee` capability signal (host's account channel active) lifts the ceiling.
+  assert.equal(effectiveTier("privateer"), "zdr-policy");
+  assert.equal(effectiveTier("privateer", { verifiedTee: true }), "tee-verified");
+  assert.ok(PROVIDER_BY_ID["privateer"].postureAware);
+});
+
+test("verifyModelPosture(privateer): pi-privacy alone sees only the zdr-policy floor", async () => {
+  // pi-privacy does NOT attest Privateer — the verified verdict comes from the host's
+  // account channel via resolveTier. On its own it never claims a TEE it can't back.
+  const res = await verifyModelPosture("privateer", "near/x");
+  assert.equal(res.tier, "zdr-policy");
+  assert.equal(res.teePosture, undefined);
 });

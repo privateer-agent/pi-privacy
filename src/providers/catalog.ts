@@ -19,7 +19,8 @@ export interface PrivacyProvider {
   label: string;
   // The BEST tier this provider can offer. `postureAware` providers resolve their
   // actual tier at runtime (OpenRouter is zdr-policy until ZDR routing is enforced,
-  // then zdr-enforced), so this is the ceiling, not a promise.
+  // then zdr-enforced; Privateer is zdr-policy on the public developer key, tee-verified
+  // only through the in-app account channel), so this is the ceiling, not a promise.
   tier: PrivacyTier;
   postureAware?: boolean;
   // True when the provider exposes a remote-attestation endpoint we actively verify
@@ -37,6 +38,27 @@ export interface PrivacyProvider {
 }
 
 export const PRIVACY_PROVIDERS: PrivacyProvider[] = [
+  {
+    id: "privateer",
+    label: "Privateer",
+    // Posture-aware, exactly like OpenRouter — tee-verified is the CEILING, not a
+    // promise. Privateer's in-app ACCOUNT channel offers verified-TEE inference, but
+    // pi-privacy only exercises the PUBLIC developer-key channel (sk-priv-…), which is
+    // server-proxied: the proxy mediates attestation, so a pi client can't verify the
+    // enclave end-to-end. The public key therefore floors to zdr-policy at runtime (see
+    // effectiveTier) — verified TEE is never claimed from it alone. NOT `attestable`
+    // here: pi-privacy does not attest Privateer itself. The account channel (its own
+    // OAuth session + account server + sealed relay) lives in the host (privateer-agent),
+    // which reuses this package's interpretReport/teePosture and injects the verified
+    // verdict through the extension's resolveTier hook; the picker's `verifiedTee` signal
+    // reflects that the host channel is active (see PiPrivacyOptions.privateerVerifiedTee).
+    tier: "tee-verified", // ceiling; resolves to zdr-policy on the public developer key
+    postureAware: true,
+    baseUrl: "https://api.privateer.pro/v1",
+    api: "openai-completions",
+    keyEnv: "${PRIVATEER_API_KEY}",
+    note: "privateer.pro → API keys (sk-priv-…). Public developer key is server-proxied, zero-retention by policy (NOT TEE-attested end-to-end here); verified TEE is the in-app account channel.",
+  },
   {
     id: "tinfoil",
     label: "Tinfoil (private TEE inference)",
@@ -79,19 +101,6 @@ export const PRIVACY_PROVIDERS: PrivacyProvider[] = [
     // Honest copy: ZDR is the default for OPEN models only; Fireworks's own f1 /
     // FireFunction may log. Not TEE-attested.
     note: "fireworks.ai → API Keys (open models: zero retention by default, not TEE-attested; Fireworks's own f1/FireFunction may log).",
-  },
-  {
-    id: "privateer-api",
-    label: "Privateer (developer API)",
-    tier: "zdr-policy",
-    baseUrl: "https://api.privateer.pro/v1",
-    api: "openai-completions",
-    keyEnv: "${PRIVATEER_API_KEY}",
-    // Honest copy: a server-proxied developer key (sk-priv-…). Privateer asserts
-    // zero retention, but the proxy mediates attestation — a pi client can't verify
-    // the underlying enclave end-to-end through it — so this is POLICY, not a
-    // client-verified TEE. (Verified-TEE access is the in-app account channel's job.)
-    note: "privateer.pro → API keys (sk-priv-…). Server-proxied, zero-retention by policy; NOT TEE-attested end-to-end (the proxy mediates attestation).",
   },
   {
     id: "openrouter",

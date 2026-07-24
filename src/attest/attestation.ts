@@ -6,7 +6,11 @@ import { gunzipSync } from "node:zlib";
 // Ported from privateer 0.2 (tree-cli/src/providers/attestation.ts). The pure
 // attestation logic is verbatim; what changed for the public package:
 //   - DROPPED the privateer-server-proxy path (fetchAttestationViaServer + the
-//     auth/privateer import) — that's the private account channel, not public.
+//     auth/privateer import) — that's the private account channel, not public. The
+//     host (privateer-agent) owns it: it authenticates its own OAuth session, hits its
+//     own account server, and computes the verified verdict by REUSING interpretReport
+//     / teePosture from this package, then injects the result via the extension's
+//     resolveTier hook. pi-privacy grades Privateer's PUBLIC key at its zdr-policy floor.
 //   - config type + base-URL constants inlined (no config/schema / registry deps).
 // The SEV-SNP report_data parse, SPKI match, posture mappings are untouched.
 
