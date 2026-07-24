@@ -16,6 +16,7 @@ import { effectiveTier } from "./posture/effective.ts";
 import { detectPii, redactPii, summarizePii, hasSecrets, type PiiHit } from "./pii/detect.ts";
 import { assessToolCall } from "./ext/toolgate.ts";
 import { assessDowngrade, downgradeWarning } from "./posture/downgrade.ts";
+import { rankModels, pickerOptionLabel, type PickerModel } from "./posture/picker.ts";
 
 // Verified-private tiers where PII needs no gate: an attested enclave can't read it,
 // and a loopback endpoint never sends it. NOTE zdr-* is NOT here — a ZDR provider
@@ -52,9 +53,20 @@ function redactPayloadPii(payload: any): any {
 interface PiModel {
   provider?: string;
   id?: string;
+  name?: string;
+  baseUrl?: string;
+}
+// The model registry Pi exposes on event/command contexts. getAvailable() is the
+// models the user has auth for (the honest set to offer in a picker); getAll() is
+// every configured model. Both feature-detected — a restricted context may omit them.
+interface PiModelRegistry {
+  getAvailable?(): PiModel[];
+  getAll?(): PiModel[];
 }
 interface PiCtx {
   hasUI?: boolean;
+  modelRegistry?: PiModelRegistry;
+  getModel?(): PiModel | undefined;
   ui?: {
     notify?: (message: string, level?: string) => void;
     select?: (title: string, options: string[], opts?: unknown) => Promise<string | undefined>;
@@ -69,8 +81,9 @@ interface PiCtx {
 }
 interface PiExtensionApiLike {
   registerProvider?(name: string, config: unknown): void;
-  // Used by the downgrade guard to REVERT a model switch the user declines. Feature
-  // -detected: without it the guard degrades to a warning.
+  // Used by the downgrade guard to REVERT a model switch the user declines, and by the
+  // /models picker to APPLY a chosen model. Returns false when no API key is available.
+  // Feature-detected: without it the guard degrades to a warning and the picker says so.
   setModel?(model: unknown): boolean | Promise<boolean>;
   registerCommand?(
     name: string,
@@ -141,6 +154,16 @@ export interface PiPrivacyOptions {
   // switch; "off": disabled. With no UI, a downgrade carrying CREDENTIALS is
   // reverted (mirroring the tool gate's loud-and-safe default), mere PII notified.
   downgradePolicy?: "warn" | "block" | "off";
+  // Register the `/models` command (default true): a privacy-ranked picker that lists
+  // the models you can actually use, strongest privacy first, each labeled with what
+  // it can offer — turning pi-privacy from an observer of your model choice into a
+  // help for making it. Honest by construction: an attestable TEE model shows as
+  // "Verifiable TEE" (a capability), never the live "Verified" badge, until you pick
+  // it and attestation runs.
+  modelPicker?: boolean;
+  // The command name the picker registers under (default "models"; Pi's built-in is
+  // the singular "model"). A host can rename it to avoid a clash with another extension.
+  modelPickerCommand?: string;
 }
 
 // Config-only providers Pi doesn't ship: register these. Built-ins + custom skipped.
@@ -249,6 +272,8 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
     renderBadge,
     toolExfilPolicy = "warn",
     downgradePolicy = "warn",
+    modelPicker = true,
+    modelPickerCommand = "models",
     resolveTier,
   } = opts;
 
@@ -537,6 +562,79 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
           }
         },
       });
+
+      // The privacy-ranked model picker (#2). Lists the models the user can actually
+      // use, strongest privacy first, each labeled with what it can offer — so privacy
+      // is something you PICK, not just something the badge reports afterward.
+      if (modelPicker) {
+        pi.registerCommand(modelPickerCommand, {
+          description: "Pick a model ranked by privacy (verified TEE / on-device / ZDR first)",
+          handler: async (_args, ctx) => {
+            const reg = ctx.modelRegistry;
+            // getAvailable() = models with auth configured (the honest, switchable set).
+            // Fall back to getAll() so the picker still ranks when availability is
+            // unknown (some hosts/modes may not populate auth state here).
+            const models: PickerModel[] =
+              reg?.getAvailable?.() ?? reg?.getAll?.() ?? [];
+            if (models.length === 0) {
+              ctx.ui?.notify?.(
+                "No models to rank (none with configured auth were found).",
+                "warning",
+              );
+              return;
+            }
+
+            const ranked = rankModels(models, { zdrEnforced: enforceOpenRouterZdr });
+            const cur = ctx.getModel?.() ?? { provider: currentProviderId, id: currentModelId };
+            const isCurrent = (m: PickerModel) => m.provider === cur.provider && m.id === cur.id;
+
+            // Map each option string back to its model. Deterministic order (rankModels
+            // sorts stably), so a duplicate label — same tier, provider, id — is a true
+            // duplicate and collapsing it is harmless.
+            const byLabel = new Map<string, PickerModel>();
+            const options = ranked.map((e) => {
+              const label = pickerOptionLabel(e, isCurrent(e.model));
+              byLabel.set(label, e.model);
+              return label;
+            });
+
+            // No interactive picker (print/JSON): still surface the ranking as text —
+            // useful to SEE which of your models is most private, even headless.
+            if (!ctx.hasUI || typeof ctx.ui?.select !== "function") {
+              ctx.ui?.notify?.(
+                `Models by privacy (strongest first):\n${options.join("\n")}\n` +
+                  `◆ = TEE that verifies when selected. Switch with /model.`,
+                "info",
+              );
+              return;
+            }
+
+            const choice = await ctx.ui.select(
+              "Pick a model (strongest privacy first — ◆ verifies on select):",
+              options,
+            );
+            if (!choice) return; // cancelled
+            const model = byLabel.get(choice);
+            if (!model) return;
+            if (isCurrent(model)) {
+              ctx.ui?.notify?.("Already on that model.", "info");
+              return;
+            }
+            if (typeof pi.setModel !== "function") {
+              ctx.ui?.notify?.("This host can't switch models programmatically.", "warning");
+              return;
+            }
+            const ok = await pi.setModel(model);
+            // On success the model_select event fires refreshPosture() → live badge +
+            // attestation, so we don't duplicate that here. false = no API key.
+            if (!ok)
+              ctx.ui?.notify?.(
+                `Could not switch to ${model.provider}/${model.id} — no API key configured for it.`,
+                "warning",
+              );
+          },
+        });
+      }
     }
   };
 }

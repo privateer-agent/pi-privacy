@@ -1,0 +1,46 @@
+name: Provider request
+description: Propose a privacy-oriented provider for the catalog (or a new tier/badge).
+labels: ["provider", "enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        pi-privacy grades providers by the **strength of their evidence**, so the tier
+        depends entirely on what can be *verified*. Help us grade it honestly — see the
+        "Adding a provider" section of [CONTRIBUTING.md](../blob/main/CONTRIBUTING.md).
+  - type: input
+    id: provider
+    attributes:
+      label: Provider name + docs URL
+    validations:
+      required: true
+  - type: dropdown
+    id: claim
+    attributes:
+      label: What privacy property does it offer?
+      options:
+        - Confidential-compute / TEE with a remote-attestation endpoint we could verify
+        - TEE claimed, but no attestation endpoint (would be tee-unverified)
+        - Zero data retention by policy (unverifiable)
+        - Zero data retention, observably enforced (like OpenRouter routing)
+        - On-device / self-hosted (loopback)
+        - Not sure — help me grade it
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: >
+        Link the attestation endpoint / retention policy / enforcement behavior. For a
+        TEE claim, is there a documented attestation API and a way to bind it to the live
+        inference connection? This determines whether it can ever be `tee-verified`.
+    validations:
+      required: true
+  - type: textarea
+    id: limits
+    attributes:
+      label: Known limits
+      description: >
+        The honest caveats (e.g. "only open models are zero-retention", "proxy mediates
+        attestation", "not TEE-attested"). These become the provider's catalog note.

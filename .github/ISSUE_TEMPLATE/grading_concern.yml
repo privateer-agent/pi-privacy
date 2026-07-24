@@ -1,0 +1,41 @@
+name: Privacy grading concern
+description: A tier or badge looks like it over-claims or under-claims (the most important kind of report here).
+labels: ["grading", "privacy"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The core promise of pi-privacy is that a **verified** guarantee never reads like an
+        **asserted** one. A badge showing more (or less) confidence than the evidence
+        supports is a first-priority bug. If this is a *security* exploit (e.g. forcing a
+        green verified badge onto an unattested channel), report it privately via
+        [SECURITY.md](../blob/main/SECURITY.md) instead.
+  - type: input
+    id: where
+    attributes:
+      label: Provider / model + version
+      placeholder: "tinfoil/deepseek-v4-pro, pi-privacy 0.5.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: direction
+    attributes:
+      label: Direction of the concern
+      options:
+        - Over-claims (badge stronger than the evidence)
+        - Under-claims (badge weaker than what's actually verifiable)
+    validations:
+      required: true
+  - type: textarea
+    id: shown
+    attributes:
+      label: What the badge / `/verify` showed
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you believe the honest grade is, and why
+      description: Point to the evidence — attestation output, provider policy, endpoint, or the loopback/LAN distinction.
+    validations:
+      required: true

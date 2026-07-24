@@ -1,0 +1,44 @@
+name: Bug report
+description: Something in pi-privacy behaves incorrectly (not a privacy over/under-claim — use the dedicated template for that).
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. For a **suspected wrong privacy grade** (a tier that
+        over- or under-claims), use the "Privacy grading concern" template instead — it
+        asks for the evidence we need. For a **security vulnerability**, do not file here;
+        see [SECURITY.md](../blob/main/SECURITY.md).
+  - type: input
+    id: version
+    attributes:
+      label: pi-privacy version
+      placeholder: "0.5.0"
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Node version + OS + Pi harness
+      placeholder: "Node 22.19.0, macOS 14, pi 0.80.3"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened vs. what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Config used (env vars / pi-privacy.config.json), the model/provider selected, and the exact commands.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: "`/verify` output, badge state, or console warnings. Redact any real secrets."
+      render: shell

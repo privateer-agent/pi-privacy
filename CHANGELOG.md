@@ -4,6 +4,50 @@ All notable changes to **pi-privacy** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-07-24
+
+### Added
+
+- **Project trust infrastructure.** For a security/privacy package, verifiable process is
+  part of the guarantee. Added GitHub Actions **CI** (`.github/workflows/ci.yml`:
+  typecheck + unit tests + the two offline load smokes, on Node 22.19.0 and current) on
+  every push and PR, and a **provenance-signed publish** workflow
+  (`.github/workflows/publish.yml`) that ships to npm with `--provenance` on a version tag
+  — a public attestation linking the tarball to its source commit. Added
+  `CONTRIBUTING.md` (dev setup, the *verified ≠ asserted* discipline, and the mechanical
+  "how to add a provider / detection pattern" paths), `SECURITY.md` (private reporting +
+  an explicit scope of what is a bug vs. a documented best-effort limit),
+  `CODE_OF_CONDUCT.md`, issue templates (bug, **provider request**, **privacy grading
+  concern**), and a PR template with an honesty checklist. New npm scripts:
+  `smoke:extension`, `smoke:package`, `smoke:attest`, `smoke:zdr`.
+
+- **Privacy-ranked model picker (`/models`).** The badge and `/verify` report on a model
+  already chosen; `/models` runs the other direction — it lists the models the user
+  actually has auth for, strongest privacy first, each labeled with what it can offer, and
+  switches on selection (`pi.setModel`). Turns pi-privacy from an observer of the model
+  choice into a help for making it. Honest by construction: ranking a whole list can't
+  attest every row, so it ranks by **capability** (ceiling tier) and shows an attestable
+  TEE model as "Verifiable TEE" with a hollow ◆ — never the live green "Verified" shield,
+  which stays reserved for a real attestation that runs the moment the model is selected.
+  New pure module `src/posture/picker.ts` (`capabilityTier`, `pickerEntry`, `rankModels`,
+  `pickerOptionLabel`), exported from the root. New options `modelPicker` (default true)
+  and `modelPickerCommand` (default `models`), both settable via env/JSON config. In a
+  non-interactive run the command prints the ranking as text instead of prompting.
+
+- **Zero-code configuration for marketplace installers.** `pi install npm:pi-privacy`
+  previously loaded the extension with defaults only — every option lived behind a
+  TypeScript import of `makePiPrivacyExtension`, out of reach for a plain install. The
+  extension entry now builds its options from the environment (`PI_PRIVACY_*`) and an
+  optional `pi-privacy.config.json` (`PI_PRIVACY_CONFIG=<path>`, else the file in the
+  launch directory), env taking precedence. Covers every serializable option
+  (`piiPolicy`, `toolExfilPolicy`, `downgradePolicy`, `enforceOpenRouterZdr`, badge
+  settings, dispatcher/provider toggles). New module `src/config.ts` (`loadConfig`,
+  `optionsFromEnv`, `sanitizeConfig`), exported from the root and via the `./config`
+  subpath. Consistent with the package's honesty discipline, an invalid value warns and
+  falls back to the built-in default rather than silently coercing to something less
+  protective; the code-only function options (`onPosture`/`resolveTier`/`renderBadge`)
+  are rejected from config with a pointer to the programmatic API.
+
 ## [0.5.0] — 2026-07-22
 
 ### Added
@@ -120,6 +164,7 @@ All notable changes to **pi-privacy** are documented here. The format follows
   NEAR AI (report-body over HTTPS), observable ZDR enforcement for OpenRouter, on-device
   detection for loopback endpoints, and the `/verify` command.
 
+[0.6.0]: https://github.com/privateer-agent/pi-privacy/releases/tag/v0.6.0
 [0.5.0]: https://github.com/privateer-agent/pi-privacy/releases/tag/v0.5.0
 [0.4.0]: https://github.com/privateer-agent/pi-privacy/releases/tag/v0.4.0
 [0.3.0]: https://github.com/privateer-agent/pi-privacy/compare/v0.2.1...ca27cb6

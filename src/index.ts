@@ -52,6 +52,17 @@ export {
 
 export { effectiveTier } from "./posture/effective.ts";
 
+// Privacy-ranked model picker (pure): rank the models a user can switch to by the
+// strongest privacy each can offer, for the `/models` command.
+export {
+  type PickerModel,
+  type PickerEntry,
+  capabilityTier,
+  pickerEntry,
+  rankModels,
+  pickerOptionLabel,
+} from "./posture/picker.ts";
+
 // Posture-downgrade assessment: does switching models lower the ceiling over
 // context already known to carry sensitive material?
 export {
@@ -76,6 +87,17 @@ export {
 } from "./extension.ts";
 
 export { veniceRequestPatch, openRouterZdrPatch } from "./ext/patches.ts";
+
+// Zero-code config loader (env + optional JSON file) — how a marketplace install
+// configures the extension without writing TypeScript. Exported so hosts can reuse
+// or pre-seed it (e.g. layer their own defaults under the ambient config).
+export {
+  type ConfigurableOptions,
+  type LoadConfigDeps,
+  loadConfig,
+  optionsFromEnv,
+  sanitizeConfig,
+} from "./config.ts";
 
 // Tool-exfiltration assessor (pure): is a tool call an egress channel, and where to.
 export {

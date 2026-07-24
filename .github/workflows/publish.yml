@@ -1,0 +1,54 @@
+name: Publish
+
+# Publishes to npm WITH provenance — a signed, public attestation linking the tarball to
+# this exact commit + workflow run. For a package whose whole thesis is "verified, not
+# asserted", shipping a build users can cryptographically trace back to its source is the
+# same discipline applied to our own supply chain.
+#
+# Trigger: push a tag `vX.Y.Z` that matches package.json's version (the guard enforces
+# the match). Requires an `NPM_TOKEN` repo secret with publish rights (an automation
+# token, or configure npm trusted publishing / OIDC).
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write # required for npm provenance (OIDC)
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - name: Install (locked)
+        run: npm ci
+
+      - name: Guard — tag matches package.json version
+        run: |
+          PKG="$(node -p "require('./package.json').version")"
+          TAG="${GITHUB_REF_NAME#v}"
+          if [ "$PKG" != "$TAG" ]; then
+            echo "::error::tag v$TAG does not match package.json version $PKG"
+            exit 1
+          fi
+          echo "publishing v$PKG"
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Publish with provenance
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

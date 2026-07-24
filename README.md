@@ -1,5 +1,9 @@
 # pi-privacy
 
+[![CI](https://github.com/privateer-agent/pi-privacy/actions/workflows/ci.yml/badge.svg)](https://github.com/privateer-agent/pi-privacy/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/pi-privacy)](https://www.npmjs.com/package/pi-privacy)
+[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
 **Privacy posture + TEE attestation for [Pi](https://pi.dev) providers.** A Pi
 extension that cryptographically **verifies** confidential-enclave (TEE) inference,
 **enforces** zero-data-retention (ZDR) routing, detects **on-device** inference, and
@@ -18,6 +22,53 @@ starts verifying posture. Check the current model any time with:
 ```
 /verify
 ```
+
+## Configure it — no code required
+
+A marketplace install runs with sensible defaults (warn on PII, warn on tool exfil,
+warn on downgrade, badge on). To change any non-code option you **don't** have to write
+TypeScript — set an environment variable, or drop a `pi-privacy.config.json` next to
+where you launch Pi. Env wins over the file; anything unset keeps its default.
+
+```bash
+# e.g. silently redact PII, hard-block tool exfiltration, and enforce OpenRouter ZDR
+export PI_PRIVACY_PII_POLICY=redact
+export PI_PRIVACY_TOOL_EXFIL_POLICY=block
+export PI_PRIVACY_ENFORCE_OPENROUTER_ZDR=true
+```
+
+```jsonc
+// pi-privacy.config.json  (or point PI_PRIVACY_CONFIG=<path> at one anywhere)
+{
+  "piiPolicy": "redact",          // warn | redact | off
+  "toolExfilPolicy": "block",     // warn | block | off
+  "downgradePolicy": "warn",      // warn | block | off
+  "enforceOpenRouterZdr": true,
+  "showBadge": true,
+  "badgeSinks": ["status", "widget", "title"]
+}
+```
+
+| Env var | Option | Values |
+|---|---|---|
+| `PI_PRIVACY_PII_POLICY` | `piiPolicy` | `warn` \| `redact` \| `off` |
+| `PI_PRIVACY_TOOL_EXFIL_POLICY` | `toolExfilPolicy` | `warn` \| `block` \| `off` |
+| `PI_PRIVACY_DOWNGRADE_POLICY` | `downgradePolicy` | `warn` \| `block` \| `off` |
+| `PI_PRIVACY_ENFORCE_OPENROUTER_ZDR` | `enforceOpenRouterZdr` | `true` \| `false` |
+| `PI_PRIVACY_SHOW_BADGE` | `showBadge` | `true` \| `false` |
+| `PI_PRIVACY_BADGE_SINKS` | `badgeSinks` | comma list of `status`/`widget`/`title`/`notify` |
+| `PI_PRIVACY_BADGE_KEY` | `badgeKey` | any string |
+| `PI_PRIVACY_MODEL_PICKER` | `modelPicker` | `true` \| `false` |
+| `PI_PRIVACY_MODEL_PICKER_COMMAND` | `modelPickerCommand` | any string (default `models`) |
+| `PI_PRIVACY_INSTALL_DISPATCHER` | `installDispatcher` | `true` \| `false` |
+| `PI_PRIVACY_REGISTER_PROVIDERS` | `registerProviders` | `true` \| `false` |
+| `PI_PRIVACY_USE_DISPATCHER_TRANSPORT` | `useDispatcherTransport` | `true` \| `false` |
+
+Honest by default: an invalid value (`PI_PRIVACY_PII_POLICY=redct`) is **never** quietly
+coerced to something less protective than you meant — it warns and falls back to the
+built-in default. The three function options (`onPosture`, `resolveTier`, `renderBadge`)
+are code-only; reach them by importing `makePiPrivacyExtension` (see [Programmatic
+use](#programmatic-use)).
 
 ## The one rule: verified ≠ asserted
 
@@ -137,6 +188,35 @@ attestation resolves. `block` always reverts; with no UI, a credential following
 session downhill reverts and mere PII is announced. A quiet switch means only that
 nothing structured was detected — the same best-effort floor as everywhere else.
 
+## Pick privacy — don't just watch it
+
+The badge and `/verify` *report* on a model you already chose. `/models` runs the other
+direction: it lists the models you can actually use, **strongest privacy first**, each
+labeled with what it can offer — so privacy is something you pick up front.
+
+```
+Pick a model (strongest privacy first — ◆ verifies on select):
+  ◆ Verifiable TEE   ·  nearai/zai-org/GLM-5.1-FP8
+  ◆ Verifiable TEE   ·  tinfoil/deepseek-v4-pro
+  🛡 On-device       ·  ollama/llama3.1
+  ⚠ ZDR (by policy)  ·  fireworks/…/glm-5p1
+  • Standard         ·  openai/gpt-x   (current)
+```
+
+Same honesty rule as everywhere else, and it's the subtle part: an attestable TEE model
+shows as **Verifiable** TEE with a hollow ◆ — *never* the live green "Verified" 🛡.
+Ranking a whole list can't run an attestation per row (that would fire a probe at every
+enclave just to draw a menu), so the picker ranks by **capability** — the best tier a
+model can reach. The live proof lands the moment you select it: the normal
+`model_select` → attestation path runs, the badge shows the real verdict, and `/verify`
+prints the report. Capability is honestly labeled as capability; only a real attestation
+earns the solid shield.
+
+Only models you have auth for are listed (nothing you can't switch to). In a
+non-interactive run (`-p`/JSON) `/models` prints the ranking as text instead of
+prompting. Rename or disable it via `modelPickerCommand` / `modelPicker`
+(`PI_PRIVACY_MODEL_PICKER=off`).
+
 ## Always-on posture badge
 
 The whole point — *verified ≠ asserted* — is only useful if you can see it. pi-privacy
@@ -210,8 +290,21 @@ effectiveTier("openrouter", { zdrEnforced: true }); // → "zdr-enforced"
 
 `makePiPrivacyExtension(options?)` — `installDispatcher`, `registerProviders`,
 `enforceOpenRouterZdr`, `useDispatcherTransport`, `onPosture`, `resolveTier`,
-`piiPolicy`, `toolExfilPolicy`, `downgradePolicy`, `showBadge`, `badgeSinks`,
-`badgeKey`, `renderBadge`.
+`piiPolicy`, `toolExfilPolicy`, `downgradePolicy`, `modelPicker`, `modelPickerCommand`,
+`showBadge`, `badgeSinks`, `badgeKey`, `renderBadge`. Every option except the three
+functions (`onPosture`/`resolveTier`/`renderBadge`) is also settable with **no code**
+via env vars or `pi-privacy.config.json` — see [Configure it](#configure-it--no-code-required).
+
+## Contributing & security
+
+Adding a provider or a detection pattern is a mechanical, well-documented path — see
+[CONTRIBUTING.md](CONTRIBUTING.md), which also spells out the one rule every change must
+uphold (*verified ≠ asserted*). CI (typecheck + tests + offline load smokes) runs on every
+PR, and releases publish to npm **with provenance** — a signed attestation linking the
+tarball to its source commit, the same discipline this package applies to model providers.
+
+Found a way to make a badge over-claim, or a structured-PII false negative? That's a
+first-priority report — privately via [SECURITY.md](SECURITY.md).
 
 ## Requirements
 
