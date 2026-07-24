@@ -6,13 +6,15 @@
 // Run: node --import tsx scripts/smoke-extension.ts
 
 import { createAgentSessionServices } from "@earendil-works/pi-coding-agent";
-import { mkdirSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { makePiPrivacyExtension } from "../src/extension.ts";
 
-const AGENT_DIR = "/private/tmp/claude-501/pv-piprivacy-agent";
-const CWD = "/private/tmp/claude-501/pv-piprivacy-work";
-mkdirSync(AGENT_DIR, { recursive: true });
-mkdirSync(CWD, { recursive: true });
+// Portable, unique scratch dirs under the OS temp — so this runs anywhere (any
+// contributor, any CI runner), not just one machine's hardcoded path.
+const AGENT_DIR = mkdtempSync(join(tmpdir(), "pv-piprivacy-agent-"));
+const CWD = mkdtempSync(join(tmpdir(), "pv-piprivacy-work-"));
 
 async function main() {
   const ext = makePiPrivacyExtension({ installDispatcher: true });

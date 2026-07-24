@@ -10,8 +10,8 @@ All notable changes to **pi-privacy** are documented here. The format follows
 
 - **Project trust infrastructure.** For a security/privacy package, verifiable process is
   part of the guarantee. Added GitHub Actions **CI** (`.github/workflows/ci.yml`:
-  typecheck + unit tests + the two offline load smokes, on Node 22.19.0 and current) on
-  every push and PR, and a **provenance-signed publish** workflow
+  typecheck + the self-contained unit-test suite, on Node 22.19.0 and current) on every
+  push and PR, and a **provenance-signed publish** workflow
   (`.github/workflows/publish.yml`) that ships to npm with `--provenance` on a version tag
   — a public attestation linking the tarball to its source commit. Added
   `CONTRIBUTING.md` (dev setup, the *verified ≠ asserted* discipline, and the mechanical

@@ -299,8 +299,8 @@ via env vars or `pi-privacy.config.json` — see [Configure it](#configure-it--n
 
 Adding a provider or a detection pattern is a mechanical, well-documented path — see
 [CONTRIBUTING.md](CONTRIBUTING.md), which also spells out the one rule every change must
-uphold (*verified ≠ asserted*). CI (typecheck + tests + offline load smokes) runs on every
-PR, and releases publish to npm **with provenance** — a signed attestation linking the
+uphold (*verified ≠ asserted*). CI (typecheck + the unit-test suite) runs on every PR, and
+releases publish to npm **with provenance** — a signed attestation linking the
 tarball to its source commit, the same discipline this package applies to model providers.
 
 Found a way to make a badge over-claim, or a structured-PII false negative? That's a

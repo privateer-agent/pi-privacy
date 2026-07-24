@@ -6,16 +6,16 @@
 // Run: node --import tsx scripts/smoke-package.ts
 
 import { createAgentSessionServices } from "@earendil-works/pi-coding-agent";
-import { mkdirSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ENTRY = resolve(HERE, "..", "extensions", "pi-privacy.ts");
-const AGENT_DIR = "/private/tmp/claude-501/pv-pkg-agent";
-const CWD = "/private/tmp/claude-501/pv-pkg-work";
-mkdirSync(AGENT_DIR, { recursive: true });
-mkdirSync(CWD, { recursive: true });
+// Portable, unique scratch dirs under the OS temp — runs anywhere, not one machine.
+const AGENT_DIR = mkdtempSync(join(tmpdir(), "pv-pkg-agent-"));
+const CWD = mkdtempSync(join(tmpdir(), "pv-pkg-work-"));
 
 async function main() {
   console.log("Package load — via Pi file-based extension discovery\n");

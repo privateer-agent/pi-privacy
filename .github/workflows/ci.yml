@@ -1,9 +1,10 @@
 name: CI
 
-# Trust is the product for a privacy package: every change is typechecked, unit-tested,
-# and loaded through Pi's REAL resource loader before it can merge. The two live smokes
-# (attestation against real enclaves, OpenRouter ZDR enforcement) need network + secrets,
-# so they are intentionally NOT gated here — run them locally with `npm run smoke:*`.
+# Trust is the product for a privacy package: every change is typechecked and unit-tested
+# (the 97-case suite is self-contained — no network, no optional Pi runtime) before it can
+# merge. The smokes load the extension through Pi's REAL resource loader, so they need the
+# OPTIONAL `@earendil-works/pi-coding-agent` peer installed; they are run locally with
+# `npm run smoke:*` (the live attestation/ZDR ones also need network + secrets).
 
 on:
   push:
@@ -43,11 +44,3 @@ jobs:
 
       - name: Unit tests
         run: npm test
-
-      # Offline integration smokes: prove the extension + published package entry wire
-      # into a real Pi session and register providers with zero error diagnostics.
-      - name: Smoke — extension load
-        run: npm run smoke:extension
-
-      - name: Smoke — package entry
-        run: npm run smoke:package

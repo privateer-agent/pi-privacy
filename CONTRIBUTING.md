@@ -37,24 +37,21 @@ npm run typecheck  # tsc --noEmit
 npm test           # unit tests (node --test over tests/*.test.ts)
 ```
 
-Offline integration smokes — load the extension + published package entry through Pi's
-real resource loader:
+Smokes load the extension through Pi's **real** resource loader, so they need the optional
+`@earendil-works/pi-coding-agent` peer installed
+(`npm i -D @earendil-works/pi-coding-agent@^0.80.0`). Because that peer is optional (and
+heavy), and the live ones also need network + keys, the smokes are **local/manual**, not
+part of CI:
 
 ```bash
-npm run smoke:extension
-npm run smoke:package
+npm run smoke:extension  # offline: extension loads + registers providers
+npm run smoke:package    # offline: the published package entry loads the same way
+npm run smoke:attest     # live: verifies REAL tinfoil / NEAR enclaves
+npm run smoke:zdr        # live: OpenRouter ZDR routing is enforced (needs OPENROUTER_API_KEY)
 ```
 
-Live smokes hit real infrastructure and need network + keys, so they are **not** part of
-CI. Run them yourself when touching attestation or ZDR:
-
-```bash
-npm run smoke:attest   # verifies REAL tinfoil / NEAR enclaves
-npm run smoke:zdr      # proves OpenRouter ZDR routing is enforced (needs OPENROUTER_API_KEY)
-```
-
-CI (typecheck + tests + offline smokes, on Node 22.19.0 and current) must be green before
-a PR merges.
+CI runs typecheck + the unit-test suite (self-contained — no network, no optional peer) on
+Node 22.19.0 and current, and must be green before a PR merges.
 
 ## Adding a provider
 
