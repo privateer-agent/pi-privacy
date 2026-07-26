@@ -105,14 +105,16 @@ test("sanitizeConfig rejects a non-object", () => {
 });
 
 test("loadConfig layers env OVER the file", () => {
-  const readFile = () => JSON.stringify({ piiPolicy: "off", toolExfilPolicy: "block", showBadge: false });
+  // Tightening/neutral values only — a project-local file that WEAKENS a default is
+  // dropped by the trust floor (covered below), which would confound this test.
+  const readFile = () => JSON.stringify({ piiPolicy: "redact", toolExfilPolicy: "block", badgeKey: "k" });
   const opts = loadConfig({
-    env: { PI_PRIVACY_PII_POLICY: "redact" } as NodeJS.ProcessEnv,
+    env: { PI_PRIVACY_PII_POLICY: "warn" } as NodeJS.ProcessEnv,
     readFile,
     warn: () => {},
   });
-  // file supplies toolExfilPolicy/showBadge; env overrides piiPolicy.
-  assert.deepEqual(opts, { piiPolicy: "redact", toolExfilPolicy: "block", showBadge: false });
+  // file supplies toolExfilPolicy/badgeKey; env overrides piiPolicy.
+  assert.deepEqual(opts, { piiPolicy: "warn", toolExfilPolicy: "block", badgeKey: "k" });
 });
 
 test("loadConfig is silent when the default config file is absent", () => {
@@ -143,4 +145,83 @@ test("loadConfig warns on malformed JSON and ignores the file", () => {
   });
   assert.deepEqual(opts, {});
   assert.match(msgs[0], /not valid JSON/);
+});
+
+// ── the project-trust floor ──────────────────────────────────────────────────
+// An implicit ./pi-privacy.config.json arrives with the repository you cloned, not
+// from you. Honored blindly it is a disable switch for anyone who opens the project.
+
+test("a project-local config cannot turn the guards off", () => {
+  const { warn, msgs } = collector();
+  const readFile = () =>
+    JSON.stringify({
+      piiPolicy: "off",
+      toolExfilPolicy: "off",
+      toolResultPolicy: "off",
+      downgradePolicy: "off",
+      showBadge: false,
+      installDispatcher: false,
+      useDispatcherTransport: false,
+    });
+  const opts = loadConfig({ env: {} as NodeJS.ProcessEnv, readFile, warn });
+  assert.deepEqual(opts, {}, "every weakening setting dropped");
+  assert.equal(msgs.length, 7, "and each one named, not silently ignored");
+  assert.ok(msgs.every((m) => /WEAKER than the built-in default/.test(m)));
+  assert.ok(msgs[0].includes("PI_PRIVACY_CONFIG"), "says how to opt in if you meant it");
+});
+
+test("a project-local config CAN tighten — the floor is one-directional", () => {
+  const { warn, msgs } = collector();
+  const readFile = () =>
+    JSON.stringify({ piiPolicy: "redact", toolExfilPolicy: "block", enforceOpenRouterZdr: true, badgeKey: "k" });
+  const opts = loadConfig({ env: {} as NodeJS.ProcessEnv, readFile, warn });
+  assert.deepEqual(opts, {
+    piiPolicy: "redact",
+    toolExfilPolicy: "block",
+    enforceOpenRouterZdr: true,
+    badgeKey: "k",
+  });
+  assert.equal(msgs.length, 0, "tightening is never second-guessed");
+});
+
+test("a project-local config cannot hide the posture badge", () => {
+  const { warn, msgs } = collector();
+  // Not a guard, but its own attack: you can't notice you dropped to `standard` if
+  // nothing says so. A sink list can silently render the badge nowhere.
+  const readFile = () => JSON.stringify({ badgeSinks: ["notify"], modelPicker: false });
+  const opts = loadConfig({ env: {} as NodeJS.ProcessEnv, readFile, warn });
+  assert.deepEqual(opts, {});
+  assert.equal(msgs.length, 2);
+  assert.ok(msgs.some((m) => /can hide the\s+posture badge/.test(m)));
+});
+
+test("an EXPLICIT config path is yours — honored in full, floor and all", () => {
+  const { warn, msgs } = collector();
+  const readFile = () => JSON.stringify({ piiPolicy: "off", showBadge: false });
+  const opts = loadConfig({
+    env: { PI_PRIVACY_CONFIG: "/home/me/my-pi-privacy.json" } as NodeJS.ProcessEnv,
+    readFile,
+    warn,
+  });
+  assert.deepEqual(opts, { piiPolicy: "off", showBadge: false }, "you typed the path; a repo can't plant it");
+  assert.equal(msgs.length, 0);
+});
+
+test("a host that has resolved project trust can opt back in", () => {
+  const readFile = () => JSON.stringify({ piiPolicy: "off" });
+  const opts = loadConfig({ env: {} as NodeJS.ProcessEnv, readFile, warn: () => {}, projectTrusted: true });
+  assert.deepEqual(opts, { piiPolicy: "off" });
+});
+
+test("env vars are never clamped — a repo cannot set them", () => {
+  const { warn, msgs } = collector();
+  const opts = loadConfig({
+    env: { PI_PRIVACY_PII_POLICY: "off", PI_PRIVACY_SHOW_BADGE: "false" } as NodeJS.ProcessEnv,
+    readFile: () => {
+      throw new Error("ENOENT");
+    },
+    warn,
+  });
+  assert.deepEqual(opts, { piiPolicy: "off", showBadge: false });
+  assert.equal(msgs.length, 0);
 });

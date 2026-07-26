@@ -27,7 +27,7 @@ export type ConfigurableOptions = Omit<
   "onPosture" | "resolveTier" | "renderBadge" | "privateerVerifiedTee"
 >;
 
-const POLICY3 = ["warn", "redact", "off"] as const; // piiPolicy
+const POLICY3 = ["warn", "redact", "off"] as const; // piiPolicy, toolResultPolicy
 const TOOL_POLICY = ["warn", "block", "off"] as const; // toolExfilPolicy
 const DOWNGRADE_POLICY = ["warn", "block", "off"] as const; // downgradePolicy
 const SINKS: readonly BadgeSink[] = ["status", "widget", "title", "notify"];
@@ -100,6 +100,11 @@ export function optionsFromEnv(env: NodeJS.ProcessEnv, warn: Warn): Configurable
     const v = parseEnum("PI_PRIVACY_TOOL_EXFIL_POLICY", tool, TOOL_POLICY, warn);
     if (v) opts.toolExfilPolicy = v;
   }
+  const result = env.PI_PRIVACY_TOOL_RESULT_POLICY;
+  if (result) {
+    const v = parseEnum("PI_PRIVACY_TOOL_RESULT_POLICY", result, POLICY3, warn);
+    if (v) opts.toolResultPolicy = v;
+  }
   const down = env.PI_PRIVACY_DOWNGRADE_POLICY;
   if (down) {
     const v = parseEnum("PI_PRIVACY_DOWNGRADE_POLICY", down, DOWNGRADE_POLICY, warn);
@@ -154,6 +159,7 @@ export function sanitizeConfig(raw: unknown, warn: Warn): ConfigurableOptions {
 
   enumKey("piiPolicy", POLICY3, (v) => (opts.piiPolicy = v));
   enumKey("toolExfilPolicy", TOOL_POLICY, (v) => (opts.toolExfilPolicy = v));
+  enumKey("toolResultPolicy", POLICY3, (v) => (opts.toolResultPolicy = v));
   enumKey("downgradePolicy", DOWNGRADE_POLICY, (v) => (opts.downgradePolicy = v));
 
   boolKey("enforceOpenRouterZdr");
@@ -191,12 +197,94 @@ export function sanitizeConfig(raw: unknown, warn: Warn): ConfigurableOptions {
   return opts;
 }
 
+// ── the project-trust floor ──────────────────────────────────────────────────
+// An implicit ./pi-privacy.config.json is PROJECT-CONTROLLED: it arrives with the
+// repository you cloned, not from you. Honored blindly it is a disable switch —
+// {"piiPolicy":"off","toolExfilPolicy":"off"} in a hostile repo turns off the guards
+// of anyone who opens it, silently, which is the one thing this package promises
+// never to do. Pi gates project-local `.pi` config behind project trust; this file
+// sits outside that, so it carries its own floor.
+//
+// The rule: an untrusted project-local file may only make a setting MORE protective
+// than the built-in default, never less. Anything that would weaken a guard is
+// dropped with a warning naming it. Env vars and an explicit PI_PRIVACY_CONFIG path
+// are exempt — those you typed yourself; a repo can't plant them.
+
+// Protectiveness rank per enum option: higher = less data escapes.
+const PROTECTIVENESS: Record<string, Record<string, number>> = {
+  piiPolicy: { off: 0, warn: 1, redact: 2 },
+  toolExfilPolicy: { off: 0, warn: 1, block: 2 },
+  toolResultPolicy: { off: 0, warn: 1, redact: 2 },
+  downgradePolicy: { off: 0, warn: 1, block: 2 },
+};
+
+// The built-in defaults the floor is measured against (mirrors makePiPrivacyExtension).
+const DEFAULT_POLICY: Record<string, string> = {
+  piiPolicy: "warn",
+  toolExfilPolicy: "warn",
+  toolResultPolicy: "warn",
+  downgradePolicy: "warn",
+};
+
+// Boolean options whose protective value is `true`. Note these are not all "guards":
+// showBadge and modelPicker are VISIBILITY, and hiding the posture badge is its own
+// attack — you can't notice you dropped to `standard` if nothing says so.
+const PROTECTIVE_WHEN_TRUE: readonly string[] = [
+  "showBadge", // hides the live posture badge
+  "installDispatcher", // no dispatcher → no TLS-key binding for Tinfoil attestation
+  "useDispatcherTransport", // attestation stops binding to the real inference connection
+  "registerProviders", // removes the private providers from the model list
+  "modelPicker", // removes the privacy-ranked picker
+];
+
+// Apply the floor to options parsed from an untrusted project-local config file.
+// Pure; returns a copy with weakening keys dropped.
+export function clampProjectConfig(opts: ConfigurableOptions, warn: Warn): ConfigurableOptions {
+  const src = opts as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  const note = (key: string, val: unknown, floor: string) =>
+    warn(
+      `project-local pi-privacy.config.json sets ${key}=${JSON.stringify(val)}, which is WEAKER than the ` +
+        `built-in default (${floor}) — ignoring it. A project you open must not be able to turn off your ` +
+        `privacy guards. If you meant it, set the PI_PRIVACY_* env var, or point PI_PRIVACY_CONFIG at this file.`,
+    );
+
+  for (const [key, val] of Object.entries(src)) {
+    const ranks = PROTECTIVENESS[key];
+    if (ranks) {
+      const floor = DEFAULT_POLICY[key];
+      if ((ranks[String(val)] ?? 0) < ranks[floor]) {
+        note(key, val, `"${floor}"`);
+        continue;
+      }
+    } else if (PROTECTIVE_WHEN_TRUE.includes(key) && val === false) {
+      note(key, val, "true");
+      continue;
+    } else if (key === "badgeSinks") {
+      // A sink list can hide the badge outright (route it to a surface this UI
+      // doesn't expose and nothing renders), so a project doesn't get to pick it.
+      warn(
+        `project-local pi-privacy.config.json sets badgeSinks — ignoring it, since a sink list can hide the ` +
+          `posture badge. Set PI_PRIVACY_BADGE_SINKS, or point PI_PRIVACY_CONFIG at this file, if you meant it.`,
+      );
+      continue;
+    }
+    out[key] = val;
+  }
+  return out as ConfigurableOptions;
+}
+
 export interface LoadConfigDeps {
   env?: NodeJS.ProcessEnv;
   // Injected for tests; defaults to a real synchronous file read.
   readFile?: (path: string) => string;
   cwd?: string;
   warn?: Warn;
+  // Honor an implicit ./pi-privacy.config.json in full, including settings that
+  // WEAKEN the defaults (see the project-trust floor above). Default false. A host
+  // that has actually resolved project trust — e.g. via Pi's project_trust event or
+  // ctx.isProjectTrusted() — can pass true; nothing else should.
+  projectTrusted?: boolean;
 }
 
 // The full loader used by the extension entry: file (if any) then env on top.
@@ -231,5 +319,10 @@ function loadFileConfig(env: NodeJS.ProcessEnv, deps: LoadConfigDeps, warn: Warn
     warn(`config file "${path}" is not valid JSON: ${(e as Error).message} — ignoring it.`);
     return {};
   }
-  return sanitizeConfig(parsed, warn);
+  const opts = sanitizeConfig(parsed, warn);
+  // An EXPLICIT path (PI_PRIVACY_CONFIG=…) is yours — you typed it, so it's honored
+  // in full. The implicit ./pi-privacy.config.json came with the project, so unless
+  // the host has resolved trust it may only tighten, never weaken.
+  if (explicit || deps.projectTrusted) return opts;
+  return clampProjectConfig(opts, warn);
 }

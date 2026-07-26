@@ -98,15 +98,22 @@ export {
   loadConfig,
   optionsFromEnv,
   sanitizeConfig,
+  clampProjectConfig,
 } from "./config.ts";
 
-// Tool-exfiltration assessor (pure): is a tool call an egress channel, and where to.
+// Tool-exfiltration assessor (pure): is a tool call an egress channel, where to, and
+// does it name a credential file whose contents are the payload.
 export {
   type ToolAssessment,
   assessToolCall,
   firstRemoteUrl,
   splitCommands,
+  sensitiveFileRefs,
 } from "./ext/toolgate.ts";
+
+// Tool-RESULT (ingest) helpers (pure): what a result carries, and redaction that
+// preserves the result's shape.
+export { toolResultText, redactToolResultContent } from "./ext/results.ts";
 
 // Local structured-PII + secret detection (best-effort; emails/phones/SSNs/cards/IPs,
 // API keys/tokens/private keys).
@@ -117,6 +124,7 @@ export {
   detectPii,
   hasPii,
   hasSecrets,
+  secretHits,
   redactPii,
   summarizePii,
 } from "./pii/detect.ts";
