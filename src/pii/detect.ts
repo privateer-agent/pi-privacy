@@ -148,10 +148,21 @@ export function hasSecrets(hits: PiiHit[]): boolean {
   return hits.some((h) => SECRET_TYPES.has(h.type));
 }
 
+// Just the credential hits. The tool-RESULT gate works on these alone: an email in a
+// source file the agent is editing is not worth rewriting what the model sees, but an
+// API key entering the transcript is.
+export function secretHits(hits: PiiHit[]): PiiHit[] {
+  return hits.filter((h) => SECRET_TYPES.has(h.type));
+}
+
 // Redact structured PII in text, replacing each match with a typed placeholder.
-export function redactPii(text: string): string {
+// `only` restricts redaction to a subset of types (e.g. SECRET_TYPES) — everything
+// outside it is left byte-for-byte alone, so a caller that only means to strip
+// credentials can't silently rewrite the rest of the text.
+export function redactPii(text: string, only?: ReadonlySet<PiiType>): string {
   let out = text;
   for (const { type, re, validate } of PATTERNS) {
+    if (only && !only.has(type)) continue;
     out = out.replace(re, (m) => (validate && !validate(m) ? m : PLACEHOLDER[type]));
   }
   return out;

