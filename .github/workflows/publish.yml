@@ -42,9 +42,14 @@ jobs:
       # .nvmrc pins Node 22.19.0, which ships npm 10.9.3 — too old to perform the OIDC
       # exchange (needs npm >= 11.5.1). Upgrade the CLI only; the Node version stays
       # exactly what the package declares it supports.
+      #
+      # Pinned to the 11.x line, NOT @latest: npm 12 requires Node ^22.22.2, so `@latest`
+      # silently became uninstallable on our pinned runtime the moment it shipped. A
+      # release pipeline that breaks when an unrelated project cuts a major is not a
+      # pipeline you can trust to be there on release day.
       - name: Upgrade npm (OIDC trusted publishing needs >= 11.5.1)
         run: |
-          npm install -g npm@latest
+          npm install -g npm@11
           npm --version
 
       - name: Install (locked)
