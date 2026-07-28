@@ -4,6 +4,73 @@ All notable changes to **pi-privacy** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] — 2026-07-28
+
+### Added
+
+- **The tool-surface axis — who else is in the session, and who put them there.** Every
+  gate so far is reactive: it judges one request, one tool call, one model switch. None
+  answers the question that comes before all of them — the model channel may be a verified
+  enclave, but *who else is in the room*. This matters in Pi specifically: Pi has no MCP by
+  design, so its third-party surface is **skills and extensions**, and it loads both from
+  `.pi/` and `.agents/` under the working directory — meaning they arrive with the
+  repository you cloned. 0.8.0 established that a project you open can't disarm your
+  config; a project could still **supply a capability**, and nothing was watching. Two new
+  pure modules: `src/surface/tools.ts` classifies each tool by **provenance** (from Pi's
+  `sourceInfo` — a fact, not a heuristic: builtin / user / package / project / temporary)
+  and by the reach its schema **declares**; `src/surface/ledger.ts` records the egress
+  actually **observed**. New `/surface` command plus a condensed section in `/verify`.
+- **`toolSurfacePolicy`** (`warn` default | `report` | `off`, env
+  `PI_PRIVACY_TOOL_SURFACE_POLICY`; command name via `toolSurfaceCommand`). In `warn`, a
+  **one-time** prompt the first time a tool *the project supplied* is about to run —
+  *Run it* / *Show me the file* / *Allow project tools for this session* / *Block*. Pi's
+  docs say to review skill content before use; **Show me the file** is that advice made
+  reachable at the moment it's actionable. Deliberately **not a permission system**: Pi
+  ships no permission popups, and a gate that fires on every call is a gate people switch
+  off — so it fires once per tool, on *provenance*, and never for tools you chose. No
+  `block` mode: `setActiveTools` could hard-disable a tool, but silently removing one
+  changes what the model believes it can do and makes the resulting failures
+  unattributable.
+
+  Behaviours that follow from the honesty rule rather than convenience: a **block does not
+  latch** (a latch would wave the tool through the moment the model retried it); a host
+  that can't expose its tool list produces **silence, not a prompt** asserting a provenance
+  we never established; and with no UI it **allows with a notice** — provenance is a
+  signal, not a detected credential, so nothing here justifies breaking an unattended run.
+
+  **The honesty rule, third application.** *Declared* reach is what the tool's author
+  wrote, and an author hiding it wouldn't mention it — evidence: none, always labeled
+  `(declared)`. *Observed* egress is the only place a host is ever named as fact. Same
+  split as the picker's ◆ Verifiable vs 🛡 Verified. And **provenance is not safety**:
+  `builtin` means "not supplied by your repo", never "safe"; a reach of `unassessed` is
+  exactly that, not a clean bill of health.
+
+  **Two overclaims it refuses.** Pi lets an extension replace built-in tools entirely, so a
+  project-supplied tool registering itself as `bash` or `read` is still reported as
+  `project` — if the familiar name won, the one bucket that is never flagged would be the
+  easiest to enter. Symmetrically, "local files only" is asserted only for a genuine Pi
+  builtin: a project-supplied `read` is a different tool that borrowed a name.
+
+  **The limit, printed with the evidence rather than in a footnote.** The ledger only sees
+  egress flowing through `tool_call` / `user_bash`. An extension calling `fetch()` inside
+  its own handler never appears — pi-privacy *is* an extension and has no privileged view
+  of its peers. "Observed" is a **floor, not an accounting**, and an under-reporting ledger
+  that read as complete would be the same overclaim as a badge saying verified without a
+  proof. Not covered yet: skills are prompt-injected and never appear in `getAllTools()`,
+  so this sees extension-registered tools only.
+
+### Fixed
+
+- **A project-local config can no longer hide a command by renaming it.** The floor ranks
+  options by protectiveness, but a *rename* weakens no policy a rank can measure — it just
+  makes `/surface` or `/models` unfindable, which is all it needed to do. `badgeSinks`'
+  special case is generalised into `PROJECT_MAY_NOT_SET`, now also covering
+  `toolSurfaceCommand` and **`modelPickerCommand`** (the pre-existing instance of the same
+  hole). `toolSurfacePolicy` additionally joins `PROTECTIVENESS` (`off` < `report` <
+  `warn`) — the sharpest case the floor exists for, since it is the axis that reports what
+  the project supplied, and quietly downgrading it to `report` is the attack with extra
+  steps.
+
 ## [0.8.0] — 2026-07-26
 
 ### Added
@@ -238,6 +305,8 @@ All notable changes to **pi-privacy** are documented here. The format follows
   NEAR AI (report-body over HTTPS), observable ZDR enforcement for OpenRouter, on-device
   detection for loopback endpoints, and the `/verify` command.
 
+[0.9.0]: https://github.com/privateer-agent/pi-privacy/releases/tag/v0.9.0
+[0.8.0]: https://github.com/privateer-agent/pi-privacy/releases/tag/v0.8.0
 [0.7.0]: https://github.com/privateer-agent/pi-privacy/releases/tag/v0.7.0
 [0.6.0]: https://github.com/privateer-agent/pi-privacy/releases/tag/v0.6.0
 [0.5.0]: https://github.com/privateer-agent/pi-privacy/releases/tag/v0.5.0
