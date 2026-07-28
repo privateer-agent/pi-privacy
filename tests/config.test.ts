@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { optionsFromEnv, sanitizeConfig, loadConfig } from "../src/config.ts";
+import { optionsFromEnv, sanitizeConfig, loadConfig, clampProjectConfig } from "../src/config.ts";
 
 // A warn collector so we can assert honest-failure behavior (invalid values warn +
 // fall through to the default rather than silently coercing).
@@ -224,4 +224,72 @@ test("env vars are never clamped — a repo cannot set them", () => {
   });
   assert.deepEqual(opts, { piiPolicy: "off", showBadge: false });
   assert.equal(msgs.length, 0);
+});
+
+// ── the tool-surface axis: config + the project-trust floor ──────────────────
+
+test("toolSurfacePolicy + toolSurfaceCommand are settable from env and JSON", () => {
+  const msgs: string[] = [];
+  const warn = (m: string) => msgs.push(m);
+  assert.deepEqual(
+    optionsFromEnv(
+      { PI_PRIVACY_TOOL_SURFACE_POLICY: "report", PI_PRIVACY_TOOL_SURFACE_COMMAND: " whoelse " } as any,
+      warn,
+    ),
+    { toolSurfacePolicy: "report", toolSurfaceCommand: "whoelse" },
+  );
+  assert.deepEqual(sanitizeConfig({ toolSurfacePolicy: "off", toolSurfaceCommand: "surface" }, warn), {
+    toolSurfacePolicy: "off",
+    toolSurfaceCommand: "surface",
+  });
+  assert.equal(msgs.length, 0);
+});
+
+test("toolSurfacePolicy: an invalid value falls back loudly, never quietly", () => {
+  const msgs: string[] = [];
+  assert.deepEqual(optionsFromEnv({ PI_PRIVACY_TOOL_SURFACE_POLICY: "quiet" } as any, (m) => msgs.push(m)), {});
+  assert.match(msgs[0], /warn\|report\|off/);
+});
+
+// The sharpest case the floor exists for. The tool-surface axis reports tools
+// supplied BY THE PROJECT — so a project-local config turning it down isn't a
+// hypothetical attack, it's the whole attack, and it would leave no trace.
+test("floor: a project-local config cannot turn down the tool-surface axis", () => {
+  for (const weaker of ["off", "report"]) {
+    const msgs: string[] = [];
+    assert.deepEqual(clampProjectConfig({ toolSurfacePolicy: weaker } as any, (m) => msgs.push(m)), {});
+    assert.match(msgs[0], /toolSurfacePolicy/);
+    assert.match(msgs[0], /WEAKER/);
+  }
+  // Tightening — here, the default — is never second-guessed.
+  assert.deepEqual(clampProjectConfig({ toolSurfacePolicy: "warn" }, () => {}), {
+    toolSurfacePolicy: "warn",
+  });
+});
+
+// The same hole in the same shape as toolSurfaceCommand: a repo that renames /models
+// weakens no policy the ranks can measure, it just makes the privacy-ranked picker
+// unfindable — which is all it needed to do.
+test("floor: a project-local config cannot rename the /models picker either", () => {
+  const msgs: string[] = [];
+  assert.deepEqual(clampProjectConfig({ modelPickerCommand: "zzz" }, (m) => msgs.push(m)), {});
+  assert.match(msgs[0], /modelPickerCommand/);
+  assert.match(msgs[0], /can hide the privacy-ranked model picker/);
+});
+
+// Renaming the command hides the listing just as effectively as disabling it, and a
+// rename has no protectiveness ordering for the floor's rank model to work with.
+test("floor: a project-local config cannot rename the /surface command", () => {
+  const msgs: string[] = [];
+  const out = clampProjectConfig({ toolSurfaceCommand: "zzz" }, (m) => msgs.push(m));
+  assert.deepEqual(out, {});
+  assert.match(msgs[0], /toolSurfaceCommand/);
+  assert.match(msgs[0], /can hide the tool-surface listing/);
+});
+
+test("floor: the badgeSinks rule still names itself after the refactor", () => {
+  const msgs: string[] = [];
+  assert.deepEqual(clampProjectConfig({ badgeSinks: ["notify"] } as any, (m) => msgs.push(m)), {});
+  assert.match(msgs[0], /badgeSinks/);
+  assert.match(msgs[0], /can hide the posture badge/);
 });

@@ -111,6 +111,39 @@ export {
   sensitiveFileRefs,
 } from "./ext/toolgate.ts";
 
+// The tool-surface axis (pure): who supplied each tool in the session (provenance)
+// and what it DECLARES it can reach — the "who else is in the room?" question no
+// per-call gate can answer.
+export {
+  type ToolProvenance,
+  type ToolReach,
+  type ToolInfoLike,
+  type ToolSurfaceEntry,
+  type SurfaceSummary,
+  toolProvenance,
+  toolReach,
+  isRepoSupplied,
+  classifyTool,
+  rankSurface,
+  summarizeSurface,
+  surfaceLine,
+  surfaceReport,
+} from "./surface/tools.ts";
+
+// The observed-egress ledger (pure): where tool calls actually went, as opposed to
+// where a tool's schema says it could go. A floor, never a full accounting.
+export {
+  type EgressObservation,
+  type EgressLedger,
+  UNNAMED_HOST,
+  createLedger,
+  hostOf,
+  recordEgress,
+  ledgerHosts,
+  observationLine,
+  ledgerReport,
+} from "./surface/ledger.ts";
+
 // Tool-RESULT (ingest) helpers (pure): what a result carries, and redaction that
 // preserves the result's shape.
 export { toolResultText, redactToolResultContent } from "./ext/results.ts";

@@ -23,6 +23,13 @@ starts verifying posture. Check the current model any time with:
 /verify
 ```
 
+…and see who else is in the session — every tool, by who supplied it, plus the egress
+actually observed — with:
+
+```
+/surface
+```
+
 ## Configure it — no code required
 
 A marketplace install runs with sensible defaults (warn on PII, warn on tool exfil,
@@ -62,6 +69,8 @@ export PI_PRIVACY_ENFORCE_OPENROUTER_ZDR=true
 | `PI_PRIVACY_BADGE_KEY` | `badgeKey` | any string |
 | `PI_PRIVACY_MODEL_PICKER` | `modelPicker` | `true` \| `false` |
 | `PI_PRIVACY_MODEL_PICKER_COMMAND` | `modelPickerCommand` | any string (default `models`) |
+| `PI_PRIVACY_TOOL_SURFACE_POLICY` | `toolSurfacePolicy` | `warn` \| `report` \| `off` |
+| `PI_PRIVACY_TOOL_SURFACE_COMMAND` | `toolSurfaceCommand` | any string (default `surface`) |
 | `PI_PRIVACY_INSTALL_DISPATCHER` | `installDispatcher` | `true` \| `false` |
 | `PI_PRIVACY_REGISTER_PROVIDERS` | `registerProviders` | `true` \| `false` |
 | `PI_PRIVACY_USE_DISPATCHER_TRANSPORT` | `useDispatcherTransport` | `true` \| `false` |
@@ -87,9 +96,18 @@ than the built-in default ("warn") — ignoring it. …
 ```
 
 The floor covers the guards *and* the badge (`showBadge`, `badgeSinks`, `modelPicker`,
-`installDispatcher`, `useDispatcherTransport`) — hiding the posture display is its own
-attack, since you can't notice you dropped to `standard` if nothing says so. Tightening
-is never second-guessed. Two escapes, both requiring something a repo can't plant: set
+`installDispatcher`, `useDispatcherTransport`, `toolSurfacePolicy`) — hiding the posture
+display is its own attack, since you can't notice you dropped to `standard` if nothing
+says so. `toolSurfacePolicy` is the sharpest case: it's the axis that reports tools *the
+project supplied*, so a repo turning it down isn't a hypothetical attack, it's the whole
+attack.
+
+Two command names — `toolSurfaceCommand` and `modelPickerCommand` — are dropped from a
+project-local file **outright** rather than ranked, because a rename weakens no policy a
+rank can measure; it just makes `/surface` or `/models` unfindable, which is all it
+needed to do.
+
+Tightening is never second-guessed. Two escapes, both requiring something a repo can't plant: set
 the `PI_PRIVACY_*` env var, or point `PI_PRIVACY_CONFIG` at the file explicitly (a path
 you typed is yours, and is honored in full). A host that has actually resolved project
 trust — Pi's `project_trust` event, `ctx.isProjectTrusted()` — can pass
@@ -266,6 +284,105 @@ attestation resolves. `block` always reverts; with no UI, a credential following
 session downhill reverts and mere PII is announced. A quiet switch means only that
 nothing structured was detected — the same best-effort floor as everywhere else.
 
+## Who else is in the room?
+
+Every gate above is reactive: it judges one request, one tool call, one model switch.
+None of them answers the question you'd want answered *first* — my model channel is a
+verified enclave, so **who else is in this session, and who put them there?**
+
+That question has teeth in Pi specifically. Pi has [no MCP by
+design](https://mariozechner.at/posts/2025-11-02-what-if-you-dont-need-mcp/); its
+third-party surface is **skills and extensions**, and it loads both from `.pi/` and
+`.agents/` under the working directory — which means **they arrive with the repository
+you cloned**. Pi's own docs say it plainly: *"Skills can instruct the model to perform
+any action and may include executable code the model invokes."* pi-privacy already
+makes this argument for configuration (a project you open can't disarm your guards); a
+project could still **supply a capability**, and nothing was watching that.
+
+So `/surface` inventories the session's tools by **who supplied them**, and records the
+egress that was actually **observed**:
+
+```
+Tools     18 tools available · 2 not supplied by you
+          ⚠ project   fetch_docs   .pi/extensions/docs.ts     — network (declared)
+          ⚠ project   deploy       .pi/skills/deploy/SKILL.md — shell (unbounded)
+          • package   grep_web     pi-web-tools               — network (declared)
+          … 15 builtin
+          ⚠ marks a tool that came with this working directory or a CLI flag, not
+            from your configuration. That is where it came FROM — pi-privacy does
+            not judge what it does.
+
+Observed  bash → api.github.com    12 calls
+          ! command → hooks.slack.com   1 call  (1 carried PII/credentials, 1 blocked)
+          (observed via tool calls only — an extension's own fetch() never appears
+           here, so this is a floor)
+```
+
+`/verify` carries a condensed version of the same section, because a verified enclave
+was never the whole answer.
+
+**Same honesty rule, third application.** Two things must never render alike:
+
+- **declared** reach — the tool's own parameters or description carry a URL surface.
+  Evidence: *none*. It's what the tool's author wrote, and an author who wanted to hide
+  it simply wouldn't mention it. Always labeled `(declared)`.
+- **observed** egress — we saw this call leave. Evidence: *observable*. The `Observed`
+  block is the only place a host is ever named as fact.
+
+That's the same split as the picker's ◆ *Verifiable* versus 🛡 *Verified*. And a second
+rule that matters just as much: **provenance is not safety.** `builtin` doesn't mean
+"safe", it means "not supplied by your repo"; a project-supplied tool is usually just
+the repo's legitimate tooling. A tool whose reach reads `unassessed` is exactly that —
+unassessed, not cleared.
+
+Because Pi lets an extension *replace built-in tools entirely*, a project-supplied tool
+that registers itself as `bash` or `read` is still reported as `project` — the familiar
+name never wins over Pi's source metadata, or the one bucket that's never flagged would
+be the easiest one to enter. For the same reason `local files only` is asserted only for
+a genuine Pi builtin: a project-supplied `read` is a different tool that borrowed a name.
+
+**The limit, stated where the evidence is shown.** The ledger only sees egress that
+flows through Pi's `tool_call` / `user_bash` events. An extension that calls `fetch()`
+inside its own handler never appears — pi-privacy *is* an extension and has no
+privileged view of its peers. `Observed` is a **floor, not an accounting**, and an
+under-reporting ledger that read as complete would be the same overclaim as a badge that
+says verified without a proof.
+
+### Asked once, at the moment it matters
+
+An inventory you have to go read is an inventory nobody reads. So the first time a tool
+**the project supplied** is about to run, pi-privacy asks — once:
+
+```
+⚠ `deploy` was supplied by this project (.pi/skills/deploy/SKILL.md), not by you. It is
+about to run for the first time this session. This says where it came FROM, not that it
+is unsafe.
+   [Run it]  [Show me the file]  [Allow project tools for this session]  [Block]
+```
+
+Pi's docs say to *review skill content before use*; **[Show me the file]** is that advice
+made reachable at the moment it's actionable, instead of a warning that assumes you
+already did it. (It re-asks after showing you, and is bounded — no prompt loop.)
+
+```ts
+makePiPrivacyExtension({ toolSurfacePolicy: "warn" }); // "warn" (default) | "report" | "off"
+```
+
+Deliberately **not a permission system** — Pi ships no permission popups by design, and a
+gate that fires on every call is a gate people switch off. So it fires once per tool, on
+*provenance*, and **never for tools you chose** (builtin, user, package). `report` keeps
+the inventory and drops the prompt; `off` disables the axis. Answering *"Allow project
+tools for this session"* covers all of them at once.
+
+Three details that follow from the honesty rule rather than convenience: **Block does not
+latch** (a latch would wave the tool through the moment the model retried it), a host that
+can't tell us where a tool came from produces **silence rather than a prompt** about a
+provenance we never established, and with no UI it **allows with a notice** — provenance
+is a signal, not a detected credential, so there's nothing here worth breaking an
+unattended run over. There is no `block` mode: Pi can hard-disable a tool via
+`setActiveTools`, but silently removing one changes what the model believes it can do and
+makes the resulting failures unattributable.
+
 ## Pick privacy — don't just watch it
 
 The badge and `/verify` *report* on a model you already chose. `/models` runs the other
@@ -369,7 +486,7 @@ effectiveTier("openrouter", { zdrEnforced: true }); // → "zdr-enforced"
 `makePiPrivacyExtension(options?)` — `installDispatcher`, `registerProviders`,
 `enforceOpenRouterZdr`, `useDispatcherTransport`, `onPosture`, `resolveTier`,
 `piiPolicy`, `toolExfilPolicy`, `toolResultPolicy`, `downgradePolicy`, `modelPicker`, `modelPickerCommand`,
-`showBadge`, `badgeSinks`, `badgeKey`, `renderBadge`. Every option except the three
+`toolSurfacePolicy`, `toolSurfaceCommand`, `showBadge`, `badgeSinks`, `badgeKey`, `renderBadge`. Every option except the three
 functions (`onPosture`/`resolveTier`/`renderBadge`) is also settable with **no code**
 via env vars or `pi-privacy.config.json` — see [Configure it](#configure-it--no-code-required).
 

@@ -20,7 +20,10 @@ import { isLocalEndpoint } from "../providers/catalog.ts";
 // files never sends bytes off-box (what they RETURN to the model is covered by the
 // model-payload gate instead). Excluded from egress so we don't false-positive on a
 // `read` of a file that happens to contain a key.
-const LOCAL_TOOLS: ReadonlySet<string> = new Set(["read", "grep", "find", "ls", "edit", "write"]);
+// Exported so the tool-surface axis (surface/tools.ts) classifies reach from the
+// SAME list rather than a second copy that could drift out of agreement with the
+// gate — two different answers to "is this tool local" is a bug waiting to happen.
+export const LOCAL_TOOLS: ReadonlySet<string> = new Set(["read", "grep", "find", "ls", "edit", "write"]);
 
 // Network-egress shell invocations. Anchored to a word boundary at a command
 // position (start, or after a shell separator) so we match the *program*, not the

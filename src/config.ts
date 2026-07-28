@@ -30,6 +30,7 @@ export type ConfigurableOptions = Omit<
 const POLICY3 = ["warn", "redact", "off"] as const; // piiPolicy, toolResultPolicy
 const TOOL_POLICY = ["warn", "block", "off"] as const; // toolExfilPolicy
 const DOWNGRADE_POLICY = ["warn", "block", "off"] as const; // downgradePolicy
+const SURFACE_POLICY = ["warn", "report", "off"] as const; // toolSurfacePolicy
 const SINKS: readonly BadgeSink[] = ["status", "widget", "title", "notify"];
 
 type Warn = (msg: string) => void;
@@ -110,6 +111,11 @@ export function optionsFromEnv(env: NodeJS.ProcessEnv, warn: Warn): Configurable
     const v = parseEnum("PI_PRIVACY_DOWNGRADE_POLICY", down, DOWNGRADE_POLICY, warn);
     if (v) opts.downgradePolicy = v;
   }
+  const surface = env.PI_PRIVACY_TOOL_SURFACE_POLICY;
+  if (surface) {
+    const v = parseEnum("PI_PRIVACY_TOOL_SURFACE_POLICY", surface, SURFACE_POLICY, warn);
+    if (v) opts.toolSurfacePolicy = v;
+  }
 
   boolVar(opts, env, "PI_PRIVACY_ENFORCE_OPENROUTER_ZDR", "enforceOpenRouterZdr", warn);
   boolVar(opts, env, "PI_PRIVACY_SHOW_BADGE", "showBadge", warn);
@@ -127,6 +133,8 @@ export function optionsFromEnv(env: NodeJS.ProcessEnv, warn: Warn): Configurable
   if (key && key.trim()) opts.badgeKey = key.trim();
   const cmd = env.PI_PRIVACY_MODEL_PICKER_COMMAND;
   if (cmd && cmd.trim()) opts.modelPickerCommand = cmd.trim();
+  const scmd = env.PI_PRIVACY_TOOL_SURFACE_COMMAND;
+  if (scmd && scmd.trim()) opts.toolSurfaceCommand = scmd.trim();
 
   return opts;
 }
@@ -161,6 +169,7 @@ export function sanitizeConfig(raw: unknown, warn: Warn): ConfigurableOptions {
   enumKey("toolExfilPolicy", TOOL_POLICY, (v) => (opts.toolExfilPolicy = v));
   enumKey("toolResultPolicy", POLICY3, (v) => (opts.toolResultPolicy = v));
   enumKey("downgradePolicy", DOWNGRADE_POLICY, (v) => (opts.downgradePolicy = v));
+  enumKey("toolSurfacePolicy", SURFACE_POLICY, (v) => (opts.toolSurfacePolicy = v));
 
   boolKey("enforceOpenRouterZdr");
   boolKey("showBadge");
@@ -189,6 +198,11 @@ export function sanitizeConfig(raw: unknown, warn: Warn): ConfigurableOptions {
     if (typeof val === "string" && val.trim()) opts.modelPickerCommand = val.trim();
     else warn(`config.modelPickerCommand=${JSON.stringify(val)} is not a non-empty string — ignoring.`);
   }
+  if ("toolSurfaceCommand" in src) {
+    const val = src.toolSurfaceCommand;
+    if (typeof val === "string" && val.trim()) opts.toolSurfaceCommand = val.trim();
+    else warn(`config.toolSurfaceCommand=${JSON.stringify(val)} is not a non-empty string — ignoring.`);
+  }
 
   for (const k of Object.keys(src)) {
     if (k === "onPosture" || k === "resolveTier" || k === "renderBadge" || k === "privateerVerifiedTee")
@@ -216,6 +230,12 @@ const PROTECTIVENESS: Record<string, Record<string, number>> = {
   toolExfilPolicy: { off: 0, warn: 1, block: 2 },
   toolResultPolicy: { off: 0, warn: 1, redact: 2 },
   downgradePolicy: { off: 0, warn: 1, block: 2 },
+  // "report" keeps the inventory but stops warning; "off" removes the axis entirely.
+  // Both are weaker than the default, and this is the sharpest case the floor exists
+  // for: the tool-surface axis is what reports tools THE PROJECT SUPPLIED, so a
+  // project-local config turning it down is not a hypothetical attack — it is the
+  // whole attack, and it would leave no trace by construction.
+  toolSurfacePolicy: { off: 0, report: 1, warn: 2 },
 };
 
 // The built-in defaults the floor is measured against (mirrors makePiPrivacyExtension).
@@ -224,6 +244,7 @@ const DEFAULT_POLICY: Record<string, string> = {
   toolExfilPolicy: "warn",
   toolResultPolicy: "warn",
   downgradePolicy: "warn",
+  toolSurfacePolicy: "warn",
 };
 
 // Boolean options whose protective value is `true`. Note these are not all "guards":
@@ -236,6 +257,22 @@ const PROTECTIVE_WHEN_TRUE: readonly string[] = [
   "registerProviders", // removes the private providers from the model list
   "modelPicker", // removes the privacy-ranked picker
 ];
+
+// Keys a project-local file may not set AT ALL (as opposed to "may only tighten").
+// These have no protectiveness ORDERING for the rank model above to work with — any
+// value is a way to hide a display, and a hidden display is indistinguishable from a
+// disabled one:
+//   * badgeSinks: route the badge to a surface this UI doesn't expose → nothing renders.
+//   * toolSurfaceCommand: rename /surface to something the user will never type → the
+//     listing still exists and is still unreachable, which is the same as gone.
+//   * modelPickerCommand: the same hole in the same shape. A repo that renames /models
+//     doesn't weaken any policy the ranks can measure; it just makes the privacy-ranked
+//     picker unfindable, which is all it needed to do.
+const PROJECT_MAY_NOT_SET: Record<string, string> = {
+  badgeSinks: "a sink list can hide the posture badge",
+  toolSurfaceCommand: "renaming the command can hide the tool-surface listing",
+  modelPickerCommand: "renaming the command can hide the privacy-ranked model picker",
+};
 
 // Apply the floor to options parsed from an untrusted project-local config file.
 // Pure; returns a copy with weakening keys dropped.
@@ -260,12 +297,10 @@ export function clampProjectConfig(opts: ConfigurableOptions, warn: Warn): Confi
     } else if (PROTECTIVE_WHEN_TRUE.includes(key) && val === false) {
       note(key, val, "true");
       continue;
-    } else if (key === "badgeSinks") {
-      // A sink list can hide the badge outright (route it to a surface this UI
-      // doesn't expose and nothing renders), so a project doesn't get to pick it.
+    } else if (key in PROJECT_MAY_NOT_SET) {
       warn(
-        `project-local pi-privacy.config.json sets badgeSinks — ignoring it, since a sink list can hide the ` +
-          `posture badge. Set PI_PRIVACY_BADGE_SINKS, or point PI_PRIVACY_CONFIG at this file, if you meant it.`,
+        `project-local pi-privacy.config.json sets ${key} — ignoring it, since ${PROJECT_MAY_NOT_SET[key]}. ` +
+          `Set the PI_PRIVACY_* env var, or point PI_PRIVACY_CONFIG at this file, if you meant it.`,
       );
       continue;
     }

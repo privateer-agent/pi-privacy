@@ -14,7 +14,17 @@ import { verifyModelPosture, type PostureResult } from "./posture/verify.ts";
 import { TIERS, type PrivacyTier } from "./posture/tiers.ts";
 import { effectiveTier } from "./posture/effective.ts";
 import { detectPii, redactPii, summarizePii, hasSecrets, secretHits, type PiiHit } from "./pii/detect.ts";
-import { assessToolCall } from "./ext/toolgate.ts";
+import { assessToolCall, type ToolAssessment } from "./ext/toolgate.ts";
+import {
+  rankSurface,
+  summarizeSurface,
+  surfaceReport,
+  isRepoSupplied,
+  type ToolInfoLike,
+  type ToolSurfaceEntry,
+} from "./surface/tools.ts";
+import { readFileSync } from "node:fs";
+import { createLedger, recordEgress, ledgerReport } from "./surface/ledger.ts";
 import { toolResultText, redactToolResultContent } from "./ext/results.ts";
 import { assessDowngrade, downgradeWarning } from "./posture/downgrade.ts";
 import { rankModels, pickerOptionLabel, type PickerModel, type VerifiedTeeSignal } from "./posture/picker.ts";
@@ -68,6 +78,10 @@ interface PiCtx {
   hasUI?: boolean;
   modelRegistry?: PiModelRegistry;
   getModel?(): PiModel | undefined;
+  // Every configured tool with its source metadata — the input to the tool-surface
+  // axis. Present on event contexts; the restricted COMMAND context may omit it,
+  // which is why the extension keeps a snapshot taken at session_start.
+  getAllTools?(): ToolInfoLike[];
   ui?: {
     notify?: (message: string, level?: string) => void;
     select?: (title: string, options: string[], opts?: unknown) => Promise<string | undefined>;
@@ -189,6 +203,23 @@ export interface PiPrivacyOptions {
   // The command name the picker registers under (default "models"; Pi's built-in is
   // the singular "model"). A host can rename it to avoid a clash with another extension.
   modelPickerCommand?: string;
+  // The TOOL-SURFACE axis: an inventory of every tool in the session by PROVENANCE
+  // (who supplied it — you, a package, or the repository you cloned) plus a ledger of
+  // egress actually observed. Answers the question no per-call gate can — "my model
+  // channel is a verified enclave, but who else is in the room?" — and matters in Pi
+  // specifically because Pi loads skills and extensions from `.pi/` and `.agents/`
+  // under the working directory, i.e. they arrive with the repo you cloned.
+  //
+  // "warn" (default): the inventory, plus a ONE-TIME prompt the first time a tool the
+  // PROJECT supplied is about to run — the point where "you didn't install this" is
+  // actionable rather than trivia. "report": the inventory and /surface listing, no
+  // prompts ever. "off": the axis is disabled entirely.
+  //
+  // Deliberately NOT a permission system: pi deliberately ships no permission popups,
+  // so this fires once per tool per session, on PROVENANCE, and never on every call.
+  toolSurfacePolicy?: "warn" | "report" | "off";
+  // The command name the surface listing registers under (default "surface").
+  toolSurfaceCommand?: string;
 }
 
 // Config-only providers Pi doesn't ship: register these. Built-ins + custom skipped.
@@ -300,6 +331,8 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
     downgradePolicy = "warn",
     modelPicker = true,
     modelPickerCommand = "models",
+    toolSurfacePolicy = "warn",
+    toolSurfaceCommand = "surface",
     resolveTier,
     privateerVerifiedTee = false,
   } = opts;
@@ -325,6 +358,107 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
     // Session decision for the tool-RESULT (ingest) gate, so we don't re-prompt on
     // every credential-bearing result once the user has chosen.
     let resultChoice: "ask" | "redact" | "keep" = "ask";
+
+    // ── tool-surface state ───────────────────────────────────────────────────
+    // The tool inventory, snapshotted from an EVENT context (the command context is
+    // restricted and may not expose getAllTools). Refreshed whenever we see a context
+    // that has it, so a mid-session extension reload is picked up.
+    let toolSnapshot: ToolInfoLike[] = [];
+    // Name → classification, for the first-use provenance gate. Rebuilt with the
+    // snapshot so the gate and the listing can never disagree about who supplied what.
+    let surfaceByName = new Map<string, ToolSurfaceEntry>();
+    // Egress we actually OBSERVED, as opposed to reach a tool merely declares. A
+    // floor, never an accounting — see surface/ledger.ts.
+    const ledger = createLedger();
+    const surfaceOn = toolSurfacePolicy !== "off";
+    const captureTools = (ctx: PiCtx | undefined) => {
+      if (!surfaceOn || typeof ctx?.getAllTools !== "function") return;
+      try {
+        const tools = ctx.getAllTools();
+        if (!Array.isArray(tools)) return;
+        toolSnapshot = tools;
+        surfaceByName = new Map(rankSurface(tools).map((e) => [e.name, e]));
+      } catch {
+        // A host that throws here still gets every other guard; the surface section
+        // just reports what it has (nothing) rather than taking the extension down.
+      }
+    };
+
+    // ── the first-use provenance gate (toolSurfacePolicy: "warn") ────────────────
+    // Tools the user did not supply — they came with the working directory, or with a
+    // --skill flag for this run. Answered once per tool, and once for all of them via
+    // the session latch, because a gate that fires on every call is a gate people turn
+    // off. Never fires for builtin/user/package: those you chose.
+    const provenanceSeen = new Set<string>();
+    let projectToolsAllowed = false;
+
+    // Show the file a repo-supplied tool came from. Pi's own docs say to review skill
+    // content before use; "[Show me the file]" is that advice made reachable at the
+    // moment it matters, instead of a warning that assumes you already did.
+    const previewSource = (entry: ToolSurfaceEntry): string => {
+      const path = entry.sourcePath;
+      if (!path) return "No source path recorded for this tool — nothing to show.";
+      try {
+        const text = readFileSync(path, "utf8");
+        const clipped = text.length > 4000 ? `${text.slice(0, 4000)}\n… (truncated)` : text;
+        return `${path}:\n${clipped}`;
+      } catch (e) {
+        // Say we couldn't rather than implying an empty file is a harmless one.
+        return `Could not read ${path}: ${(e as Error).message}`;
+      }
+    };
+
+    const guardProvenance = async (toolName: string, ctx?: PiCtx): Promise<"allow" | "block"> => {
+      if (toolSurfacePolicy !== "warn" || projectToolsAllowed) return "allow";
+      const entry = surfaceByName.get(toolName);
+      // No inventory (a host that doesn't expose getAllTools) means we cannot say where
+      // this tool came from — and a prompt that asserts a provenance we didn't
+      // establish is exactly the overclaim this package refuses to make. Stay quiet.
+      if (!entry || !isRepoSupplied(entry.provenance)) return "allow";
+      if (provenanceSeen.has(toolName)) return "allow";
+
+      const ui = ctx?.ui ?? lastUi;
+      const warning =
+        `⚠ \`${toolName}\` was ${entry.concern}. It is about to run for the first time this session. ` +
+        `This says where it came FROM, not that it is unsafe.`;
+
+      if (!(ctx?.hasUI ?? lastHasUI) || typeof ui?.select !== "function") {
+        // No UI (print/JSON, automated): allow with a notice. Provenance is a signal,
+        // not a detected secret — unlike a credential heading off-machine, there is
+        // nothing here worth breaking an unattended run over.
+        provenanceSeen.add(toolName);
+        ui?.notify?.(warning, "warning");
+        return "allow";
+      }
+
+      // Bounded: "Show me the file" re-asks, but only so many times, so a handler can
+      // never sit in a prompt loop.
+      for (let i = 0; i < 3; i++) {
+        const choice: string | undefined = await ui.select(warning, [
+          "Run it",
+          "Show me the file",
+          "Allow project tools for this session",
+          "Block",
+        ]);
+        if (choice === "Show me the file") {
+          ui.notify?.(previewSource(entry), "info");
+          continue;
+        }
+        if (choice === "Allow project tools for this session") {
+          projectToolsAllowed = true;
+          provenanceSeen.add(toolName);
+          return "allow";
+        }
+        if (choice === "Run it") {
+          // Latched only on an ALLOW. A block that latched would silently wave the
+          // tool through the moment the model retried it.
+          provenanceSeen.add(toolName);
+          return "allow";
+        }
+        return "block"; // explicit "Block", or cancelled → the safe default
+      }
+      return "block"; // ran out of re-asks without a decision → safe default
+    };
 
     // ── downgrade-guard state ────────────────────────────────────────────────
     // The tier the accumulated context was protected by at the moment of the last
@@ -449,6 +583,15 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
       ui?.notify?.(warning, "warning");
     };
 
+    // Snapshot the tool inventory once the session exists. Deliberately NOT done in
+    // captureUi(): that runs on every request and tool call, and getAllTools() builds
+    // a fresh array each time. The tool set only changes on a session start or an
+    // extension reload, both of which re-fire this.
+    pi.on("session_start", (_event, ctx) => {
+      captureUi(ctx);
+      captureTools(ctx);
+    });
+
     pi.on("model_select", (event, ctx) => {
       const model = event?.model as PiModel | undefined;
       // Snapshot what the context was protected by BEFORE overwriting it — that's
@@ -525,11 +668,12 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
       secret: boolean;
     }
 
-    // Assess one outbound call. `toolName` drives the assessor (bash gets per-command
-    // splitting); `label` is how the call is named to the user. undefined = nothing
-    // to fire on.
-    const egressVerdict = (toolName: string | undefined, label: string, input: unknown): EgressVerdict | undefined => {
-      const assessment = assessToolCall(toolName, input);
+    // Judge one already-assessed outbound call. Takes the assessment rather than
+    // computing it, so the caller can feed the SAME verdict to the surface ledger —
+    // one assessment per call, no chance of the gate and the ledger disagreeing about
+    // what happened. `label` is how the call is named to the user. undefined =
+    // nothing to fire on. Pure: no prompts, no state.
+    const egressVerdict = (assessment: ToolAssessment, label: string, input: unknown): EgressVerdict | undefined => {
       if (!assessment.egress) return undefined;
 
       const hits = detectPii(payloadText(input));
@@ -584,11 +728,30 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
     };
 
     pi.on("tool_call", async (event, ctx) => {
-      if (toolExfilPolicy === "off") return;
+      if (toolExfilPolicy === "off" && !surfaceOn) return; // nothing to compute for
       captureUi(ctx);
-      const v = egressVerdict(event?.toolName, event?.toolName ?? "a tool", event?.input);
-      if (!v) return;
-      if ((await decideEgress(v, ctx)) === "block") return { block: true, reason: v.reason };
+      const name = event?.toolName ?? "a tool";
+
+      // The provenance question comes first: it asks whether this TOOL should run at
+      // all, which is coarser than (and independent of) what this particular call
+      // carries. A repo-supplied tool with entirely benign arguments is still a
+      // capability you didn't install.
+      if ((await guardProvenance(name, ctx)) === "block")
+        return {
+          block: true,
+          reason: `pi-privacy blocked ${name}: supplied by this project, not by you`,
+        };
+
+      const assessment = assessToolCall(event?.toolName, event?.input);
+      // The verdict is computed even when the gate is OFF, because the ledger's
+      // "carried PII/credentials" column must mean the same thing regardless of
+      // policy — a ledger whose columns change meaning with configuration is worse
+      // than no ledger. Pure and cheap; nothing acts on it below unless the gate is on.
+      const v = egressVerdict(assessment, name, event?.input);
+      let blocked = false;
+      if (toolExfilPolicy !== "off" && v) blocked = (await decideEgress(v, ctx)) === "block";
+      if (surfaceOn) recordEgress(ledger, name, assessment, { pii: !!v, blocked });
+      if (blocked) return { block: true, reason: v!.reason };
       return;
     });
 
@@ -599,19 +762,24 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
     // command is usually pasted, and the point of the gate is to notice what the
     // author of a command didn't.
     pi.on("user_bash", async (event, ctx) => {
-      if (toolExfilPolicy === "off") return;
+      if (toolExfilPolicy === "off" && !surfaceOn) return;
       captureUi(ctx);
       const command = typeof event?.command === "string" ? event.command : "";
       if (!command) return;
-      const v = egressVerdict("bash", "this ! command", { command });
-      if (!v) return;
-      if ((await decideEgress(v, ctx)) === "block") {
+      const assessment = assessToolCall("bash", { command });
+      const v = egressVerdict(assessment, "this ! command", { command });
+      let blocked = false;
+      if (toolExfilPolicy !== "off" && v) blocked = (await decideEgress(v, ctx)) === "block";
+      // Attributed to "! command", not "bash": the ledger reports what the SESSION
+      // did, and a command you typed is a different fact from one the model issued.
+      if (surfaceOn) recordEgress(ledger, "! command", assessment, { pii: !!v, blocked });
+      if (blocked) {
         // user_bash can't return a block verdict — it intercepts by supplying the
         // RESULT. A non-zero exit with the reason is the honest equivalent: the
         // command never runs, and the transcript says why.
         return {
           result: {
-            output: `${v.reason}. Set PI_PRIVACY_TOOL_EXFIL_POLICY=off (or allow it when prompted) if this is intended.`,
+            output: `${v!.reason}. Set PI_PRIVACY_TOOL_EXFIL_POLICY=off (or allow it when prompted) if this is intended.`,
             exitCode: 1,
             cancelled: false,
             truncated: false,
@@ -681,6 +849,49 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
       return { content: redacted };
     });
 
+    // ── the tool-surface section, shared by /verify and /surface ────────────────
+    // /verify answers "is my model channel private?". This answers the question no
+    // per-call gate can: who else is in this session, and who supplied them. Kept
+    // report-only in this phase — it never blocks, never prompts, and every line
+    // states its evidence grade (a tool's DECLARED reach vs egress we OBSERVED).
+    const surfaceSection = (ctx: PiCtx | undefined, full: boolean): string => {
+      captureTools(ctx); // refresh if THIS context exposes the tool list
+      const lines: string[] = [];
+      const entries = rankSurface(toolSnapshot);
+
+      if (entries.length === 0) {
+        // Say it plainly — but only when the user ASKED for the listing (/surface).
+        // An empty inventory rendered as "0 tools" would read as "nothing else is in
+        // the room", which is the opposite of what we know; and a host that can't
+        // tell us anything shouldn't add a line to every /verify. When /verify has
+        // nothing to report, the section is omitted entirely.
+        if (full) lines.push("Tools     inventory unavailable — this host did not expose the tool list.");
+      } else {
+        const report = surfaceReport(entries, !full);
+        lines.push(`Tools     ${report[0]}`);
+        for (const l of report.slice(1)) lines.push(`          ${l}`);
+        if (summarizeSurface(entries).notYours > 0)
+          lines.push(
+            "          ⚠ marks a tool that came with this working directory or a CLI flag, not from your " +
+              "configuration. That is where it came FROM — pi-privacy does not judge what it does.",
+          );
+      }
+
+      const obs = ledgerReport(ledger);
+      if (obs.length) {
+        lines.push(`Observed  ${obs[0]}`);
+        for (const l of obs.slice(1)) lines.push(`          ${l}`);
+        // The limit is part of the report, not a footnote elsewhere: this ledger only
+        // sees egress that flowed through a tool call. An extension calling fetch()
+        // in its own handler is invisible to it — pi-privacy is an extension too and
+        // has no privileged view of its peers.
+        lines.push(
+          "          (observed via tool calls only — an extension's own fetch() never appears here, so this is a floor)",
+        );
+      }
+      return lines.join("\n");
+    };
+
     if (typeof pi.registerCommand === "function") {
       pi.registerCommand("verify", {
         description: "Verify the current model's privacy posture (TEE attestation)",
@@ -712,8 +923,25 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
             }
             ctx.ui?.notify?.(`attestation report (verify independently):\n${report}`, "info");
           }
+          // The second axis. A verified enclave says nothing about who ELSE can read
+          // this session, so /verify is incomplete without it.
+          if (surfaceOn) {
+            const section = surfaceSection(ctx, false);
+            if (section) ctx.ui?.notify?.(section, "info");
+          }
         },
       });
+
+      // The full tool-surface listing (phase 1 of the surface axis): every tool by
+      // provenance, plus egress actually observed. Report-only.
+      if (surfaceOn) {
+        pi.registerCommand(toolSurfaceCommand, {
+          description: "List the session's tools by who supplied them, plus observed egress",
+          handler: (_args, ctx) => {
+            ctx.ui?.notify?.(surfaceSection(ctx, true), "info");
+          },
+        });
+      }
 
       // The privacy-ranked model picker (#2). Lists the models the user can actually
       // use, strongest privacy first, each labeled with what it can offer — so privacy
