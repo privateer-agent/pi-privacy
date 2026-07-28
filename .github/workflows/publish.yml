@@ -6,8 +6,18 @@ name: Publish
 # same discipline applied to our own supply chain.
 #
 # Trigger: push a tag `vX.Y.Z` that matches package.json's version (the guard enforces
-# the match). Requires an `NPM_TOKEN` repo secret with publish rights (an automation
-# token, or configure npm trusted publishing / OIDC).
+# the match).
+#
+# Auth is npm TRUSTED PUBLISHING (OIDC) — no long-lived credential. The runner exchanges
+# the short-lived GitHub OIDC token (hence `id-token: write` below) for a scoped npm
+# publish token, so there is no `NPM_TOKEN` secret to leak, rotate, or over-scope. That
+# is the same argument this package makes about model providers, applied to itself: a
+# standing secret in CI is a claim that it has never been exfiltrated; OIDC is a
+# credential that cannot outlive the run that used it.
+#
+# One-time setup on npmjs.com: package → Settings → Trusted Publisher → GitHub Actions,
+# with repository `privateer-agent/pi-privacy` and workflow `publish.yml`. Without that
+# registration npm rejects the exchange and this job fails closed.
 
 on:
   push:
@@ -28,6 +38,14 @@ jobs:
           node-version-file: .nvmrc
           registry-url: https://registry.npmjs.org
           cache: npm
+
+      # .nvmrc pins Node 22.19.0, which ships npm 10.9.3 — too old to perform the OIDC
+      # exchange (needs npm >= 11.5.1). Upgrade the CLI only; the Node version stays
+      # exactly what the package declares it supports.
+      - name: Upgrade npm (OIDC trusted publishing needs >= 11.5.1)
+        run: |
+          npm install -g npm@latest
+          npm --version
 
       - name: Install (locked)
         run: npm ci
@@ -65,8 +83,10 @@ jobs:
         if: steps.published.outputs.already == 'false'
         run: npm test
 
+      # No NODE_AUTH_TOKEN: auth comes from the OIDC exchange (see the header). Leaving a
+      # token in place as a "fallback" would defeat the point — the standing credential
+      # would still exist, and a misconfigured publisher would silently fall back to it
+      # instead of failing closed where you can see it.
       - name: Publish with provenance
         if: steps.published.outputs.already == 'false'
         run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
