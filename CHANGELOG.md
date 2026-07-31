@@ -4,6 +4,40 @@ All notable changes to **pi-privacy** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] — 2026-07-31
+
+### Added
+
+- **A PII gate you don't learn to dismiss.** The gate was correct and unusable: the
+  outbound payload is the *whole* conversation, so the same twelve `noreply@` commit
+  trailers re-prompted on every single turn until you latched a blanket "remember for
+  session" — which is the gate teaching you to disarm it. Three changes, all aimed at
+  firing on **what you haven't already answered**:
+  - **Only new findings prompt.** A decision is remembered for the PII it was made
+    about; unchanged findings re-apply it silently, and the prompt returns only for a
+    new type or one more of a type (*"1 email new since your last answer"*). A switch to
+    a different **provider** re-arms it — saying "send it" to one company is not saying
+    it to the next. (`newPii` / `mergePiiBaseline`, pure and tested.)
+  - **`piiAllow` — values that aren't PII here** (env `PI_PRIVACY_PII_ALLOW`). Entry
+    forms: `me@acme.com` (exact, `*` globs), `@acme.com` / `acme.com` (that domain and
+    its subdomains), `10.0.0.0/8` (an IPv4 block), any exact/globbed value. Allowlisted
+    matches are neither counted nor redacted. Reserved-by-standard shapes are on by
+    default (`example.com`, `.test`/`.invalid`/`.local`/`.localhost`, `noreply@*`,
+    `@users.noreply.github.com`, loopback/unspecified/broadcast/link-local) —
+    `piiAllowDefaults: false` turns them off. Private LAN ranges deliberately are *not*
+    default-allowed: those identify a real host on a real network.
+  - **"Show what was detected."** The prompt re-opens with a masked breakdown —
+    `p…k@realmail.com`, `192.168.1.•`, `ghp_12… (40 chars)` — so "12 emails" is a
+    decision you can actually make. Masking is one-way; types where every digit is
+    sensitive (SSN, card, IBAN, phone) show a count and nothing else.
+- **The allowlist is bounded on purpose**, since it can only ever make detection weaker:
+  a bare `*` is refused, unusable entries warn rather than silently matching nothing,
+  suppressed matches are still **counted and reported** in the detail view, and
+  `piiAllow` joins the project-trust floor's outright-refused list — a
+  `pi-privacy.config.json` that arrived with a cloned repo may not add entries, because
+  `{"piiAllow": ["*@*"]}` is `piiPolicy: "off"` for exactly that repo's data while
+  reading as a gate that honestly found nothing.
+
 ## [0.9.0] — 2026-07-28
 
 ### Added
@@ -305,6 +339,7 @@ All notable changes to **pi-privacy** are documented here. The format follows
   NEAR AI (report-body over HTTPS), observable ZDR enforcement for OpenRouter, on-device
   detection for loopback endpoints, and the `/verify` command.
 
+[0.10.0]: https://github.com/privateer-agent/pi-privacy/releases/tag/v0.10.0
 [0.9.0]: https://github.com/privateer-agent/pi-privacy/releases/tag/v0.9.0
 [0.8.0]: https://github.com/privateer-agent/pi-privacy/releases/tag/v0.8.0
 [0.7.0]: https://github.com/privateer-agent/pi-privacy/releases/tag/v0.7.0
