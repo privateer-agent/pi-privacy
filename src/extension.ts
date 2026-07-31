@@ -13,7 +13,20 @@ import { veniceRequestPatch, openRouterZdrPatch } from "./ext/patches.ts";
 import { verifyModelPosture, type PostureResult } from "./posture/verify.ts";
 import { TIERS, type PrivacyTier } from "./posture/tiers.ts";
 import { effectiveTier } from "./posture/effective.ts";
-import { detectPii, redactPii, summarizePii, hasSecrets, secretHits, type PiiHit } from "./pii/detect.ts";
+import {
+  detectPii,
+  scanPii,
+  redactPii,
+  summarizePii,
+  piiDetail,
+  hasSecrets,
+  secretHits,
+  newPii,
+  mergePiiBaseline,
+  type PiiHit,
+  type PiiType,
+} from "./pii/detect.ts";
+import { compileAllow, type AllowMatcher } from "./pii/allow.ts";
 import { assessToolCall, type ToolAssessment } from "./ext/toolgate.ts";
 import {
   rankSurface,
@@ -45,14 +58,15 @@ function payloadText(payload: any): string {
     return "";
   }
 }
-function redactPayloadPii(payload: any): any {
+function redactPayloadPii(payload: any, allow?: AllowMatcher): any {
   if (!payload || typeof payload !== "object" || !Array.isArray(payload.messages)) return payload;
+  const mask = (s: string) => redactPii(s, undefined, allow);
   const messages = payload.messages.map((m: any) => {
-    if (typeof m?.content === "string") return { ...m, content: redactPii(m.content) };
+    if (typeof m?.content === "string") return { ...m, content: mask(m.content) };
     if (Array.isArray(m?.content)) {
       return {
         ...m,
-        content: m.content.map((p: any) => (typeof p?.text === "string" ? { ...p, text: redactPii(p.text) } : p)),
+        content: m.content.map((p: any) => (typeof p?.text === "string" ? { ...p, text: mask(p.text) } : p)),
       };
     }
     return m;
@@ -148,6 +162,19 @@ export interface PiPrivacyOptions {
   // is best-effort structured PII + secrets (emails/phones/SSNs/cards/IPs, API keys/
   // tokens/private keys) — NOT a guarantee.
   piiPolicy?: "warn" | "redact" | "off";
+  // Values that are NOT PII in this session — never counted, never redacted, never
+  // prompted about. Entry forms: `me@acme.com` (exact, `*` globs), `@acme.com` or
+  // `acme.com` (that domain and its subdomains), `10.0.0.0/8` (an IPv4 block), or any
+  // exact/globbed value (`ghp_dead*`). Reserved-by-standard shapes (example.com,
+  // *.test/.invalid/.local, noreply@*, @users.noreply.github.com, loopback and
+  // link-local addresses) are allowed BY DEFAULT — they are what makes a repository
+  // full of commit trailers and doc snippets prompt on every single turn. Suppressed
+  // matches are still counted and shown in the prompt's detail view, never hidden.
+  // A project-local config file may NOT add entries (see the trust floor in config.ts).
+  piiAllow?: string[];
+  // Include the built-in reserved-shape allowlist above (default true). Set false to
+  // gate on example.com/loopback/no-reply addresses too.
+  piiAllowDefaults?: boolean;
   // Show the live posture badge (default true). Updates on model switch + each request
   // so "verified vs asserted" is always glanceable, never on-demand-only.
   showBadge?: boolean;
@@ -322,6 +349,8 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
     onPosture,
     useDispatcherTransport = true,
     piiPolicy = "warn",
+    piiAllow = [],
+    piiAllowDefaults = true,
     showBadge = true,
     badgeSinks = ["status", "widget", "title"],
     badgeKey = "pi-privacy",
@@ -353,6 +382,19 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
     let currentTier: PrivacyTier | undefined;
     // Session PII decision so we don't re-prompt every turn once the user has chosen.
     let piiChoice: "ask" | "send" | "redact" = "ask";
+    // PII already decided about this session, per type, and what was decided. The
+    // outbound payload carries the WHOLE conversation, so without this the same 12
+    // emails re-prompt on every turn until you latch a blanket "remember for session"
+    // — which is how a gate trains you to dismiss it. With it, a decision covers the
+    // PII it was made about, and a NEW type (or one more of a type) prompts again.
+    let piiSeen: Map<PiiType, number> = new Map();
+    let piiLastAction: "send" | "redact" | undefined;
+    // The allowlist matcher — values this session doesn't treat as PII at all.
+    const piiAllowed = compileAllow(piiAllow, {
+      defaults: piiAllowDefaults,
+      warn: (m) => console.warn(`[pi-privacy] ${m}`),
+    });
+    const scanOpts = { allow: piiAllowed };
     // Session decision for the tool-exfil gate (allow egress with sensitive data).
     let toolAllow = false;
     // Session decision for the tool-RESULT (ingest) gate, so we don't re-prompt on
@@ -599,6 +641,14 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
       previousTier = currentTier;
       previousModel = event?.previousModel;
       downgradeHandled = false; // arm the guard for this transition
+      // A different PROVIDER is a different audience: answering "send it" to one
+      // company is not answering it for the next one, so the already-decided baseline
+      // is dropped and the gate re-arms. An explicit "remember for session" is YOUR
+      // standing instruction and deliberately survives.
+      if (model?.provider !== currentProviderId) {
+        piiSeen = new Map();
+        piiLastAction = undefined;
+      }
       currentProviderId = model?.provider;
       currentModelId = model?.id;
       captureUi(ctx);
@@ -629,7 +679,8 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
       // verified-private ones where the gate below is skipped: knowing what a
       // private session accumulated is the whole basis for guarding the switch out
       // of it. (Local + deterministic; a few ms on a full context.)
-      const hits = detectPii(payloadText(payload));
+      const scan = scanPii(payloadText(payload), scanOpts);
+      const hits = scan.hits;
       contextHits = hits;
 
       // PII gate: only below a VERIFIED-private tier (TEE-verified/local are safe —
@@ -638,20 +689,56 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
         if (hits.length > 0) {
           let action: "send" | "redact" =
             piiChoice !== "ask" ? piiChoice : piiPolicy === "redact" ? "redact" : "send";
-          if (piiChoice === "ask" && piiPolicy === "warn" && ctx?.hasUI && typeof ctx.ui?.select === "function") {
+          // What is new since the last decision. Nothing new → the previous answer
+          // still applies and we stay quiet; the moment something appears that was
+          // never answered for, we ask again.
+          const fresh = newPii(hits, piiSeen);
+          const decided = piiChoice !== "ask" ? piiChoice : piiLastAction;
+          if (fresh.length === 0 && decided) action = decided;
+
+          if (
+            fresh.length > 0 &&
+            piiChoice === "ask" &&
+            piiPolicy === "warn" &&
+            ctx?.hasUI &&
+            typeof ctx.ui?.select === "function"
+          ) {
             const tierLabel = TIERS[currentTier ?? "standard"].label;
             const kind = hasSecrets(hits) ? "secrets/PII" : "structured PII";
-            const choice = await ctx.ui.select(
-              `⚠ ${summarizePii(hits)} detected — sending to an unverified channel (${tierLabel}). ` +
-                `Best-effort ${kind} detection only, not a guarantee.`,
-              ["Send as-is", "Redact PII", "Redact + remember for session", "Send + remember for session"],
-            );
-            if (choice === "Redact PII") action = "redact";
-            else if (choice === "Redact + remember for session") ((action = "redact"), (piiChoice = "redact"));
-            else if (choice === "Send + remember for session") ((action = "send"), (piiChoice = "send"));
-            else action = "send"; // "Send as-is" or cancelled
+            const again = piiLastAction ? ` (${summarizePii(fresh)} new since your last answer)` : "";
+            const head =
+              `⚠ ${summarizePii(hits)} detected${again} — sending to an unverified channel (${tierLabel}). ` +
+              `Best-effort ${kind} detection only, not a guarantee.`;
+            // "Show what was detected" re-opens the prompt with the masked breakdown
+            // appended, so the detail is on the same screen as the choice.
+            let title = head;
+            for (let round = 0; round < 2; round++) {
+              const options = [
+                "Send as-is",
+                "Redact PII",
+                ...(round === 0 ? ["Show what was detected"] : []),
+                "Redact + remember for session",
+                "Send + remember for session",
+              ];
+              const choice = await ctx.ui.select(title, options);
+              if (choice === "Show what was detected") {
+                title = `${head}\n\n${piiDetail(scan)}`;
+                continue;
+              }
+              if (choice === "Redact PII") action = "redact";
+              else if (choice === "Redact + remember for session") ((action = "redact"), (piiChoice = "redact"));
+              else if (choice === "Send + remember for session") ((action = "send"), (piiChoice = "send"));
+              else action = "send"; // "Send as-is" or cancelled
+              break;
+            }
           }
-          if (action === "redact") payload = redactPayloadPii(payload);
+          // Record what this payload's PII was decided to be, so the same PII does
+          // not ask again. Only the counted hits — an allowlisted value was never a
+          // question, and a hit we never got to ask about (no UI) is still answered
+          // here, since we did act on it.
+          piiSeen = mergePiiBaseline(piiSeen, hits);
+          piiLastAction = action;
+          if (action === "redact") payload = redactPayloadPii(payload, piiAllowed);
         }
       }
 
@@ -676,7 +763,7 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
     const egressVerdict = (assessment: ToolAssessment, label: string, input: unknown): EgressVerdict | undefined => {
       if (!assessment.egress) return undefined;
 
-      const hits = detectPii(payloadText(input));
+      const hits = detectPii(payloadText(input), scanOpts);
       const files = assessment.sensitiveFiles ?? [];
       // Neither a literal secret nor a credential FILE in the egress path → nothing
       // we can honestly claim to have caught.
@@ -801,7 +888,7 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
       if (toolResultPolicy === "off") return;
       captureUi(ctx);
       const content = event?.content;
-      const hits = secretHits(detectPii(toolResultText(content)));
+      const hits = secretHits(detectPii(toolResultText(content), scanOpts));
       if (hits.length === 0) return;
 
       const ui = ctx?.ui ?? lastUi;
@@ -835,7 +922,7 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
       }
 
       if (action !== "redact") return;
-      const redacted = redactToolResultContent(content);
+      const redacted = redactToolResultContent(content, undefined, piiAllowed);
       if (redacted === undefined) {
         // Detected in a shape we can't rewrite safely. Say so — reporting a
         // redaction that didn't happen is exactly the overclaim this package exists

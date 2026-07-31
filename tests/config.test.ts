@@ -287,6 +287,33 @@ test("floor: a project-local config cannot rename the /surface command", () => {
   assert.match(msgs[0], /can hide the tool-surface listing/);
 });
 
+// An allowlist only ever REMOVES detection, so a repo you cloned may not add one:
+// {"piiAllow":["*@*"]} would be piiPolicy:"off" for exactly that repo's data, and it
+// would read as a gate that honestly found nothing.
+test("floor: a project-local config cannot add PII allowlist entries", () => {
+  const msgs: string[] = [];
+  assert.deepEqual(clampProjectConfig({ piiAllow: ["@acme.com"] }, (m) => msgs.push(m)), {});
+  assert.match(msgs[0], /piiAllow/);
+  assert.match(msgs[0], /can hide PII from the gate/);
+  // Turning the built-in defaults OFF is a tightening, so it survives the floor.
+  assert.deepEqual(clampProjectConfig({ piiAllowDefaults: false }, () => {}), { piiAllowDefaults: false });
+});
+
+test("piiAllow: parsed from JSON and env, junk entries dropped with a warning", () => {
+  const msgs: string[] = [];
+  assert.deepEqual(sanitizeConfig({ piiAllow: ["@acme.com", 7, "  "] }, (m) => msgs.push(m)).piiAllow, ["@acme.com"]);
+  assert.match(msgs[0], /piiAllow/);
+  assert.deepEqual(sanitizeConfig({ piiAllow: "@acme.com" }, () => {}).piiAllow, undefined);
+  assert.deepEqual(
+    optionsFromEnv({ PI_PRIVACY_PII_ALLOW: "@acme.com, 10.0.0.0/8 me@x.io" } as NodeJS.ProcessEnv, () => {}).piiAllow,
+    ["@acme.com", "10.0.0.0/8", "me@x.io"],
+  );
+  assert.equal(
+    optionsFromEnv({ PI_PRIVACY_PII_ALLOW_DEFAULTS: "false" } as NodeJS.ProcessEnv, () => {}).piiAllowDefaults,
+    false,
+  );
+});
+
 test("floor: the badgeSinks rule still names itself after the refactor", () => {
   const msgs: string[] = [];
   assert.deepEqual(clampProjectConfig({ badgeSinks: ["notify"] } as any, (m) => msgs.push(m)), {});

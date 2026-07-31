@@ -48,6 +48,7 @@ export PI_PRIVACY_ENFORCE_OPENROUTER_ZDR=true
 // pi-privacy.config.json  (or point PI_PRIVACY_CONFIG=<path> at one anywhere)
 {
   "piiPolicy": "redact",          // warn | redact | off
+  "piiAllow": ["@acme.com", "10.0.0.0/8"],   // values that aren't PII here (see below)
   "toolExfilPolicy": "block",     // warn | block | off
   "toolResultPolicy": "warn",     // warn | redact | off
   "downgradePolicy": "warn",      // warn | block | off
@@ -60,6 +61,8 @@ export PI_PRIVACY_ENFORCE_OPENROUTER_ZDR=true
 | Env var | Option | Values |
 |---|---|---|
 | `PI_PRIVACY_PII_POLICY` | `piiPolicy` | `warn` \| `redact` \| `off` |
+| `PI_PRIVACY_PII_ALLOW` | `piiAllow` | comma/space list — `me@acme.com`, `@acme.com`, `10.0.0.0/8`, `ghp_dead*` |
+| `PI_PRIVACY_PII_ALLOW_DEFAULTS` | `piiAllowDefaults` | `true` \| `false` |
 | `PI_PRIVACY_TOOL_EXFIL_POLICY` | `toolExfilPolicy` | `warn` \| `block` \| `off` |
 | `PI_PRIVACY_TOOL_RESULT_POLICY` | `toolResultPolicy` | `warn` \| `redact` \| `off` |
 | `PI_PRIVACY_DOWNGRADE_POLICY` | `downgradePolicy` | `warn` \| `block` \| `off` |
@@ -102,10 +105,12 @@ says so. `toolSurfacePolicy` is the sharpest case: it's the axis that reports to
 project supplied*, so a repo turning it down isn't a hypothetical attack, it's the whole
 attack.
 
-Two command names — `toolSurfaceCommand` and `modelPickerCommand` — are dropped from a
-project-local file **outright** rather than ranked, because a rename weakens no policy a
-rank can measure; it just makes `/surface` or `/models` unfindable, which is all it
-needed to do.
+Three keys are dropped from a project-local file **outright** rather than ranked. Two are
+command names — `toolSurfaceCommand` and `modelPickerCommand` — because a rename weakens
+no policy a rank can measure; it just makes `/surface` or `/models` unfindable, which is
+all it needed to do. The third is `piiAllow`: an allowlist only ever *removes* detection,
+so `{"piiAllow": ["*@*"]}` is `piiPolicy: "off"` for exactly the data that repo cares
+about, and it would read as a gate that honestly found nothing.
 
 Tightening is never second-guessed. Two escapes, both requiring something a repo can't plant: set
 the `PI_PRIVACY_*` env var, or point `PI_PRIVACY_CONFIG` at the file explicitly (a path
@@ -163,6 +168,40 @@ session: API keys (`sk-…`, Slack, Google, Stripe), AWS access keys, GitHub tok
 JWTs, and PEM private-key blocks. These are prefix-anchored, so precision stays high
 without an entropy heuristic that would flag every hash or id. A credential present
 escalates the warning wording.
+
+### A gate you don't learn to dismiss
+
+A warning that fires on every turn is a warning you stop reading, so the gate is built
+to fire on **what you haven't already answered**:
+
+- **It asks once per finding, not once per turn.** The outbound payload is the *whole*
+  conversation, so PII you already decided about is still in it next turn. Your answer
+  is remembered *for that PII*: unchanged findings re-apply it silently, and the prompt
+  returns only when something new appears — a new type, or one more of a type ("*1 email
+  new since your last answer*"). Switching to a different **provider** re-arms it: saying
+  "send it" to one company isn't saying it to the next.
+- **You can see what it found.** *Show what was detected* re-opens the same choice with a
+  masked breakdown — `p…k@realmail.com`, `192.168.1.•`, `ghp_12… (40 chars)` — plus what
+  the allowlist suppressed. Masking is one-way: enough to recognize your own fixture,
+  never enough to reconstruct from a screenshot. Types where every digit matters (SSN,
+  card, IBAN) show a count and nothing else.
+- **`piiAllow` — things that aren't PII here.** Pattern detection fires on anything
+  email-*shaped*, which in a repository means commit trailers, doc snippets and config
+  hosts. Entries: `me@acme.com` (exact, `*` globs), `@acme.com` / `acme.com` (that domain
+  and its subdomains), `10.0.0.0/8` (an IPv4 block), or any exact/globbed value.
+
+  Reserved-by-standard shapes are allowed **by default**: `example.com`/`.org`/`.net`,
+  the `.test`/`.invalid`/`.local`/`.localhost` TLDs, `noreply@*`,
+  `@users.noreply.github.com`, and loopback/unspecified/broadcast/link-local addresses.
+  Private LAN ranges (`10/8`, `192.168/16`, `172.16/12`) deliberately are **not** — those
+  identify a real host on a real network. Turn the built-ins off with
+  `piiAllowDefaults: false`.
+
+  An allowlist only ever *removes* detection, so it is bounded on purpose: a bare `*` is
+  refused, suppressed matches are still **counted and shown** in the detail view rather
+  than vanished, and a project-local `pi-privacy.config.json` may not add entries at all
+  (see [the floor](#a-project-you-open-cant-disarm-you)) — "allowlist my domain" from a
+  repo you just cloned is an off switch wearing a different hat.
 
 **Honesty bound (the whole point):** this is *best-effort structured detection*,
 never a guarantee. It is local + deterministic — it never sends your data to a model to
@@ -485,7 +524,7 @@ effectiveTier("openrouter", { zdrEnforced: true }); // → "zdr-enforced"
 
 `makePiPrivacyExtension(options?)` — `installDispatcher`, `registerProviders`,
 `enforceOpenRouterZdr`, `useDispatcherTransport`, `onPosture`, `resolveTier`,
-`piiPolicy`, `toolExfilPolicy`, `toolResultPolicy`, `downgradePolicy`, `modelPicker`, `modelPickerCommand`,
+`piiPolicy`, `piiAllow`, `piiAllowDefaults`, `toolExfilPolicy`, `toolResultPolicy`, `downgradePolicy`, `modelPicker`, `modelPickerCommand`,
 `toolSurfacePolicy`, `toolSurfaceCommand`, `showBadge`, `badgeSinks`, `badgeKey`, `renderBadge`. Every option except the three
 functions (`onPosture`/`resolveTier`/`renderBadge`) is also settable with **no code**
 via env vars or `pi-privacy.config.json` — see [Configure it](#configure-it--no-code-required).

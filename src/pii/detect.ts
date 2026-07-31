@@ -6,6 +6,8 @@
 // structured detection", never a guarantee. Callers must label it that way — the
 // same verified-vs-claimed discipline as the posture engine.
 
+import type { AllowMatcher } from "./allow.ts";
+
 const PLACEHOLDER: Record<PiiType, string> = {
   email: "«email»",
   phone: "«phone»",
@@ -124,22 +126,106 @@ export interface PiiHit {
   count: number;
 }
 
-// Detect structured PII in text. Returns the types present with counts (not the raw
-// values — we don't want to log the PII we found).
-export function detectPii(text: string): PiiHit[] {
-  if (!text) return [];
+export interface ScanOptions {
+  // Values this session does not treat as PII (see pii/allow.ts). Matches are moved
+  // to `suppressed` instead of `hits`, and redaction leaves them alone.
+  allow?: AllowMatcher;
+  // Max distinct masked samples to keep per type (default 4, 0 disables sampling).
+  samples?: number;
+}
+
+// One detected value, masked for display. Masking is one-way and deliberately
+// lossy: enough to recognize your own test fixture ("«p…k@gmail.com»"), never
+// enough to reconstruct the value from a screenshot or a log.
+export interface PiiSample {
+  type: PiiType;
+  masked: string;
+}
+
+export interface PiiScan {
+  // Types that count as PII here, with counts.
+  hits: PiiHit[];
+  // Matches the allowlist removed. Reported, never hidden — a gate that silently
+  // drops matches is indistinguishable from a gate that missed them.
+  suppressed: PiiHit[];
+  // Masked examples of the counted (NOT suppressed) values, for "show me what you
+  // found" in the prompt.
+  samples: PiiSample[];
+}
+
+// Mask one value for display. Types whose every digit is sensitive (SSN, card,
+// IBAN, phone) get NO sample — there is no prefix of an SSN worth showing, and a
+// count is enough to decide. Types where the identity is in the shape (the domain
+// of an email, the prefix of a token) show that part only.
+export function maskPii(type: PiiType, value: string): string | undefined {
+  switch (type) {
+    case "email": {
+      const at = value.lastIndexOf("@");
+      const local = value.slice(0, at);
+      const domain = value.slice(at);
+      const head = local.length > 2 ? `${local[0]}…${local[local.length - 1]}` : "…";
+      return `${head}${domain}`;
+    }
+    case "ip":
+      return value.replace(/\.\d{1,3}$/, ".•");
+    case "mac":
+      return `${value.slice(0, 8)}:••:••:••`;
+    case "private-key":
+      return "-----BEGIN PRIVATE KEY----- block";
+    case "aws-key":
+    case "gh-token":
+    case "api-key":
+    case "jwt":
+      // Prefix identifies WHICH credential (ghp_ vs sk-), length shows it is whole.
+      return `${value.slice(0, 6)}… (${value.length} chars)`;
+    default:
+      return undefined;
+  }
+}
+
+// Scan text once: what counts, what the allowlist suppressed, and masked samples.
+// Never returns a raw detected value — the samples are masked at the source, so a
+// caller cannot accidentally log or send one.
+export function scanPii(text: string, opts: ScanOptions = {}): PiiScan {
+  if (!text) return { hits: [], suppressed: [], samples: [] };
+  const { allow, samples: sampleCap = 4 } = opts;
   const counts = new Map<PiiType, number>();
+  const skipped = new Map<PiiType, number>();
+  const seen = new Map<PiiType, Set<string>>();
   for (const { type, re, validate } of PATTERNS) {
     for (const m of text.matchAll(re)) {
       if (validate && !validate(m[0])) continue;
+      if (allow?.(type, m[0])) {
+        skipped.set(type, (skipped.get(type) ?? 0) + 1);
+        continue;
+      }
       counts.set(type, (counts.get(type) ?? 0) + 1);
+      if (sampleCap > 0) {
+        const masked = maskPii(type, m[0]);
+        if (masked) {
+          const set = seen.get(type) ?? new Set<string>();
+          if (set.size < sampleCap) set.add(masked);
+          seen.set(type, set);
+        }
+      }
     }
   }
-  return [...counts.entries()].map(([type, count]) => ({ type, count }));
+  const toHits = (m: Map<PiiType, number>) => [...m.entries()].map(([type, count]) => ({ type, count }));
+  return {
+    hits: toHits(counts),
+    suppressed: toHits(skipped),
+    samples: [...seen.entries()].flatMap(([type, set]) => [...set].map((masked) => ({ type, masked }))),
+  };
 }
 
-export function hasPii(text: string): boolean {
-  return detectPii(text).length > 0;
+// Detect structured PII in text. Returns the types present with counts (not the raw
+// values — we don't want to log the PII we found).
+export function detectPii(text: string, opts: ScanOptions = {}): PiiHit[] {
+  return scanPii(text, { ...opts, samples: 0 }).hits;
+}
+
+export function hasPii(text: string, opts: ScanOptions = {}): boolean {
+  return detectPii(text, opts).length > 0;
 }
 
 // True when any hit is a credential (not merely consumer PII). Drives the escalated
@@ -159,11 +245,17 @@ export function secretHits(hits: PiiHit[]): PiiHit[] {
 // `only` restricts redaction to a subset of types (e.g. SECRET_TYPES) — everything
 // outside it is left byte-for-byte alone, so a caller that only means to strip
 // credentials can't silently rewrite the rest of the text.
-export function redactPii(text: string, only?: ReadonlySet<PiiType>): string {
+// An ALLOWLISTED value is left alone too: it was never counted as PII, so masking it
+// would rewrite text the gate already declared harmless.
+export function redactPii(text: string, only?: ReadonlySet<PiiType>, allow?: AllowMatcher): string {
   let out = text;
   for (const { type, re, validate } of PATTERNS) {
     if (only && !only.has(type)) continue;
-    out = out.replace(re, (m) => (validate && !validate(m) ? m : PLACEHOLDER[type]));
+    out = out.replace(re, (m) => {
+      if (validate && !validate(m)) return m;
+      if (allow?.(type, m)) return m;
+      return PLACEHOLDER[type];
+    });
   }
   return out;
 }
@@ -185,4 +277,50 @@ export function summarizePii(hits: PiiHit[]): string {
     "private-key": ["private key", "private keys"],
   };
   return hits.map((h) => `${h.count} ${label[h.type][h.count === 1 ? 0 : 1]}`).join(", ");
+}
+
+// ── what the gate actually found ─────────────────────────────────────────────
+// "12 emails detected" is a number you can only accept or refuse. This is the
+// breakdown behind it: masked samples per type, plus what the allowlist suppressed,
+// so the decision is informed rather than a coin flip on an aggregate.
+export function piiDetail(scan: PiiScan): string {
+  const lines: string[] = [];
+  for (const hit of scan.hits) {
+    const shown = scan.samples.filter((s) => s.type === hit.type).map((s) => s.masked);
+    const more = hit.count - shown.length;
+    const tail = shown.length
+      ? `: ${shown.join(", ")}${more > 0 ? `, +${more} more` : ""}`
+      : " (masked — not shown)";
+    lines.push(`  • ${summarizePii([hit])}${tail}`);
+  }
+  if (scan.suppressed.length) {
+    lines.push(`  • allowlisted (not counted): ${summarizePii(scan.suppressed)}`);
+  }
+  lines.push("  Values are masked here; the full values are in what would be sent.");
+  return lines.join("\n");
+}
+
+// ── "only prompt on NEW PII" ─────────────────────────────────────────────────
+// The outbound payload is the WHOLE conversation, so PII you already decided about
+// is still there on every later turn. Diffing against what was already decided is
+// what turns "prompt every turn forever" into "prompt when something changes".
+export type PiiBaseline = ReadonlyMap<PiiType, number>;
+
+// The part of `hits` that exceeds the baseline: types never seen, and types whose
+// count has grown (a 13th email is a new email). Counts are the DELTA.
+export function newPii(hits: readonly PiiHit[], baseline: PiiBaseline): PiiHit[] {
+  const out: PiiHit[] = [];
+  for (const h of hits) {
+    const seen = baseline.get(h.type) ?? 0;
+    if (h.count > seen) out.push({ type: h.type, count: h.count - seen });
+  }
+  return out;
+}
+
+// Fold a decided scan into the baseline. Max, not sum: counts are cumulative over
+// the same growing context, so a shorter payload later must not lower the bar.
+export function mergePiiBaseline(baseline: PiiBaseline, hits: readonly PiiHit[]): Map<PiiType, number> {
+  const out = new Map(baseline);
+  for (const h of hits) out.set(h.type, Math.max(out.get(h.type) ?? 0, h.count));
+  return out;
 }

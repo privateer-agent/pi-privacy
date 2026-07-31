@@ -153,11 +153,24 @@ export { toolResultText, redactToolResultContent } from "./ext/results.ts";
 export {
   type PiiType,
   type PiiHit,
+  type PiiScan,
+  type PiiSample,
+  type PiiBaseline,
+  type ScanOptions,
   SECRET_TYPES,
   detectPii,
+  scanPii,
   hasPii,
   hasSecrets,
   secretHits,
   redactPii,
   summarizePii,
+  maskPii,
+  piiDetail,
+  newPii,
+  mergePiiBaseline,
 } from "./pii/detect.ts";
+
+// The PII allowlist: values the gate does not treat as PII (reserved example/test
+// domains, loopback addresses, no-reply senders, plus your own entries).
+export { type AllowMatcher, type CompileAllowOptions, compileAllow, DEFAULT_ALLOW } from "./pii/allow.ts";

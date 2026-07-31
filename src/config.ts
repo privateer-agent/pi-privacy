@@ -129,6 +129,15 @@ export function optionsFromEnv(env: NodeJS.ProcessEnv, warn: Warn): Configurable
     const v = parseSinks("PI_PRIVACY_BADGE_SINKS", sinks, warn);
     if (v) opts.badgeSinks = v;
   }
+  // Comma/space separated allowlist entries (see PiPrivacyOptions.piiAllow).
+  const allow = env.PI_PRIVACY_PII_ALLOW;
+  if (allow) {
+    const parts = allow.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean);
+    if (parts.length) opts.piiAllow = parts;
+    else warn(`PI_PRIVACY_PII_ALLOW="${allow}" has no entries — ignoring it.`);
+  }
+  boolVar(opts, env, "PI_PRIVACY_PII_ALLOW_DEFAULTS", "piiAllowDefaults", warn);
+
   const key = env.PI_PRIVACY_BADGE_KEY;
   if (key && key.trim()) opts.badgeKey = key.trim();
   const cmd = env.PI_PRIVACY_MODEL_PICKER_COMMAND;
@@ -177,6 +186,16 @@ export function sanitizeConfig(raw: unknown, warn: Warn): ConfigurableOptions {
   boolKey("registerProviders");
   boolKey("useDispatcherTransport");
   boolKey("modelPicker");
+  boolKey("piiAllowDefaults");
+
+  if ("piiAllow" in src) {
+    const val = src.piiAllow;
+    if (Array.isArray(val)) {
+      const out = val.filter((s): s is string => typeof s === "string" && s.trim().length > 0).map((s) => s.trim());
+      if (out.length !== val.length) warn(`config.piiAllow has non-string/empty entries — dropping them.`);
+      if (out.length) opts.piiAllow = out;
+    } else warn(`config.piiAllow is not an array of strings — ignoring.`);
+  }
 
   if ("badgeSinks" in src) {
     const val = src.badgeSinks;
@@ -269,6 +288,11 @@ const PROTECTIVE_WHEN_TRUE: readonly string[] = [
 //     doesn't weaken any policy the ranks can measure; it just makes the privacy-ranked
 //     picker unfindable, which is all it needed to do.
 const PROJECT_MAY_NOT_SET: Record<string, string> = {
+  // The sharpest of the lot: `{"piiAllow": ["*@*", "@acme.com"]}` in a cloned repo is
+  // piiPolicy:"off" for exactly the data that repo cares about, and it would read as a
+  // gate that simply found nothing. An allowlist only ever REMOVES detection, so it
+  // can only come from you.
+  piiAllow: "an allowlist entry can hide PII from the gate entirely",
   badgeSinks: "a sink list can hide the posture badge",
   toolSurfaceCommand: "renaming the command can hide the tool-surface listing",
   modelPickerCommand: "renaming the command can hide the privacy-ranked model picker",

@@ -18,6 +18,7 @@
 // never a guarantee.
 
 import { redactPii, SECRET_TYPES, type PiiType } from "../pii/detect.ts";
+import type { AllowMatcher } from "../pii/allow.ts";
 
 // Flatten a tool result's content to text for detection. Pi's tool results are
 // normally a string or an array of content parts ({type:"text",text}), but a custom
@@ -49,22 +50,25 @@ export function toolResultText(content: unknown): string {
 export function redactToolResultContent(
   content: unknown,
   only: ReadonlySet<PiiType> = SECRET_TYPES,
+  // Values the session doesn't treat as PII — left byte-for-byte alone, matching
+  // what detection counted (see pii/allow.ts).
+  allow?: AllowMatcher,
 ): unknown | undefined {
   if (typeof content === "string") {
-    const out = redactPii(content, only);
+    const out = redactPii(content, only, allow);
     return out === content ? undefined : out;
   }
   if (Array.isArray(content)) {
     let changed = false;
     const out = content.map((p) => {
       if (typeof p === "string") {
-        const r = redactPii(p, only);
+        const r = redactPii(p, only, allow);
         if (r !== p) changed = true;
         return r;
       }
       const text = (p as { text?: unknown })?.text;
       if (typeof text === "string") {
-        const r = redactPii(text, only);
+        const r = redactPii(text, only, allow);
         if (r !== text) changed = true;
         return { ...(p as object), text: r };
       }

@@ -149,6 +149,116 @@ test("PII gate: warns/redacts below TEE, skips verified-private, remembers choic
   assert.doesNotMatch(JSON.stringify(out2), /a@b\.com/);
 });
 
+test("PII gate: unchanged PII doesn't re-prompt; NEW PII does", async () => {
+  const pi = fakePi();
+  const asks: string[] = [];
+  const ctx = { hasUI: true, ui: { select: async (title: string) => (asks.push(title), "Send as-is") } };
+  makePiPrivacyExtension({ installDispatcher: false })(pi as any);
+  const req = pi.handlers["before_provider_request"];
+  pi.handlers["model_select"]({ model: { provider: "openrouter", id: "m" } }, {});
+
+  const turn1 = { messages: [{ role: "user", content: "mail a@b.com and c@d.com" }] };
+  await req({ payload: turn1 }, ctx);
+  assert.equal(asks.length, 1, "prompted for the first PII");
+
+  // The payload is the whole conversation, so the same PII is present again — and
+  // was already answered for. No prompt.
+  await req({ payload: turn1 }, ctx);
+  await req({ payload: turn1 }, ctx);
+  assert.equal(asks.length, 1, "same PII, already decided → silent");
+
+  // One more email is something the earlier answer never covered.
+  const turn2 = { messages: [{ role: "user", content: "mail a@b.com and c@d.com and e@f.com" }] };
+  await req({ payload: turn2 }, ctx);
+  assert.equal(asks.length, 2, "new PII re-prompts");
+  assert.match(asks[1], /1 email new since your last answer/);
+
+  // A new TYPE counts as new too.
+  const turn3 = { messages: [{ role: "user", content: "mail a@b.com and c@d.com and e@f.com, ssn 123-45-6789" }] };
+  await req({ payload: turn3 }, ctx);
+  assert.equal(asks.length, 3, "a new type re-prompts");
+});
+
+test("PII gate: the earlier decision keeps applying to unchanged PII", async () => {
+  const pi = fakePi();
+  let asks = 0;
+  const ctx = { hasUI: true, ui: { select: async () => (asks++, "Redact PII") } };
+  makePiPrivacyExtension({ installDispatcher: false })(pi as any);
+  const req = pi.handlers["before_provider_request"];
+  pi.handlers["model_select"]({ model: { provider: "openrouter", id: "m" } }, {});
+
+  const payload = { messages: [{ role: "user", content: "mail a@b.com" }] };
+  const out1 = await req({ payload }, ctx);
+  assert.doesNotMatch(JSON.stringify(out1), /a@b\.com/);
+  // "Redact PII" was a one-turn answer, but it answered for THIS PII: the same PII
+  // stays redacted without asking again.
+  const out2 = await req({ payload }, ctx);
+  assert.equal(asks, 1, "not re-prompted");
+  assert.doesNotMatch(JSON.stringify(out2), /a@b\.com/, "still redacted");
+});
+
+test("PII gate: a provider switch re-arms the gate for the same PII", async () => {
+  const pi = fakePi();
+  let asks = 0;
+  const ctx = { hasUI: true, ui: { select: async () => (asks++, "Send as-is") } };
+  // downgradePolicy off so the only prompts counted here are the PII gate's — the
+  // downgrade guard has its own tests.
+  makePiPrivacyExtension({ installDispatcher: false, downgradePolicy: "off" })(pi as any);
+  const req = pi.handlers["before_provider_request"];
+  const sel = pi.handlers["model_select"];
+
+  sel({ model: { provider: "openrouter", id: "m" } }, {});
+  const payload = { messages: [{ role: "user", content: "mail a@b.com" }] };
+  await req({ payload }, ctx);
+  await req({ payload }, ctx);
+  assert.equal(asks, 1);
+
+  sel({ model: { provider: "groq", id: "m" } }, {}); // a different company entirely
+  await req({ payload }, ctx);
+  assert.equal(asks, 2, "sending the same PII to a new provider is a new question");
+});
+
+test("PII gate: 'Show what was detected' shows masked detail, then still decides", async () => {
+  const pi = fakePi();
+  const titles: string[] = [];
+  const answers = ["Show what was detected", "Redact PII"];
+  const ctx = {
+    hasUI: true,
+    ui: { select: async (title: string) => (titles.push(title), answers.shift()) },
+  };
+  makePiPrivacyExtension({ installDispatcher: false })(pi as any);
+  pi.handlers["model_select"]({ model: { provider: "openrouter", id: "m" } }, {});
+  const payload = { messages: [{ role: "user", content: "mail patrick@realmail.com, docs a@example.com" }] };
+  const out = await pi.handlers["before_provider_request"]({ payload }, ctx);
+
+  assert.equal(titles.length, 2, "detail is shown by re-opening the same choice");
+  assert.match(titles[1], /p…k@realmail\.com/, "masked sample");
+  assert.doesNotMatch(titles[1], /patrick@realmail\.com/, "never the raw value");
+  assert.match(titles[1], /allowlisted \(not counted\): 1 email/, "suppressed matches are reported, not hidden");
+  assert.doesNotMatch(JSON.stringify(out), /realmail/, "the choice after the detail still applies");
+});
+
+test("PII gate: allowlisted values don't count, don't prompt, and aren't redacted", async () => {
+  const pi = fakePi();
+  let asks = 0;
+  const ctx = { hasUI: true, ui: { select: async () => (asks++, "Redact PII") } };
+  makePiPrivacyExtension({ installDispatcher: false, piiAllow: ["@acme.com"] })(pi as any);
+  pi.handlers["model_select"]({ model: { provider: "openrouter", id: "m" } }, {});
+
+  // Reserved-by-default + user entry only → nothing to gate on.
+  const benign = { messages: [{ role: "user", content: "me@acme.com, docs a@example.com, bind 127.0.0.1" }] };
+  const out = await pi.handlers["before_provider_request"]({ payload: benign }, ctx);
+  assert.equal(asks, 0, "no prompt for allowlisted-only PII");
+  assert.match(JSON.stringify(out ?? benign), /me@acme\.com/, "left byte-for-byte alone");
+
+  // A real address still gates, and redaction leaves the allowlisted one intact.
+  const mixed = { messages: [{ role: "user", content: "me@acme.com and stranger@other.com" }] };
+  const out2 = await pi.handlers["before_provider_request"]({ payload: mixed }, ctx);
+  assert.equal(asks, 1);
+  assert.match(JSON.stringify(out2), /me@acme\.com/);
+  assert.doesNotMatch(JSON.stringify(out2), /stranger@other\.com/);
+});
+
 test("posture badge: pending on select, then painted from the resolved tier", async () => {
   const pi = fakePi();
   const statuses: [string, string | undefined][] = [];
