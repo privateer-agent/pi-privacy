@@ -19,6 +19,7 @@ import {
   redactPii,
   summarizePii,
   piiDetail,
+  piiInline,
   hasSecrets,
   secretHits,
   newPii,
@@ -162,6 +163,23 @@ export interface PiPrivacyOptions {
   // is best-effort structured PII + secrets (emails/phones/SSNs/cards/IPs, API keys/
   // tokens/private keys) — NOT a guarantee.
   piiPolicy?: "warn" | "redact" | "off";
+  // Unattended signal for the PII gate (e.g. the host's "step away from the keyboard"
+  // switch — privateer's no-quarter). While it returns true, the interactive
+  // send-or-redact question is SWALLOWED the safe way: the payload is auto-redacted
+  // and sent, and the decision is surfaced as output instead of a prompt — what was
+  // masked (same masked samples as the prompt's detail view) and where it went. A
+  // live function rather than a boolean because hosts flip this mid-session; a bare
+  // `true` works for always-unattended surfaces. An explicit earlier "… + remember
+  // for session" answer still wins — that was your standing instruction. Code-only
+  // on purpose (not settable from config): it silences a question, so only the host
+  // that owns the unattended state may assert it.
+  piiUnattended?: boolean | (() => boolean);
+  // Style the unattended auto-redact notice. Receives the plain notice text; returns
+  // the string actually shown (e.g. wrapped in the host's palette colors so it reads
+  // as its own kind of output, distinct from warnings). When provided the notice is
+  // emitted at "info" level (the host owns the look); without it, plain text at
+  // "warning" level so it stays visible.
+  renderPiiAutoRedact?: (notice: string) => string;
   // Values that are NOT PII in this session — never counted, never redacted, never
   // prompted about. Entry forms: `me@acme.com` (exact, `*` globs), `@acme.com` or
   // `acme.com` (that domain and its subdomains), `10.0.0.0/8` (an IPv4 block), or any
@@ -349,6 +367,8 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
     onPosture,
     useDispatcherTransport = true,
     piiPolicy = "warn",
+    piiUnattended = false,
+    renderPiiAutoRedact,
     piiAllow = [],
     piiAllowDefaults = true,
     showBadge = true,
@@ -382,6 +402,10 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
     let currentTier: PrivacyTier | undefined;
     // Session PII decision so we don't re-prompt every turn once the user has chosen.
     let piiChoice: "ask" | "send" | "redact" = "ask";
+    // Live unattended signal — read at gate time, every time, because hosts flip it
+    // mid-session (privateer's shift+tab no-quarter toggle).
+    const piiUnattendedNow = (): boolean =>
+      typeof piiUnattended === "function" ? !!piiUnattended() : !!piiUnattended;
     // PII already decided about this session, per type, and what was decided. The
     // outbound payload carries the WHOLE conversation, so without this the same 12
     // emails re-prompt on every turn until you latch a blanket "remember for session"
@@ -696,7 +720,21 @@ export function makePiPrivacyExtension(opts: PiPrivacyOptions = {}) {
           const decided = piiChoice !== "ask" ? piiChoice : piiLastAction;
           if (fresh.length === 0 && decided) action = decided;
 
-          if (
+          if (fresh.length > 0 && piiChoice === "ask" && piiPolicy === "warn" && piiUnattendedNow()) {
+            // Unattended (the host's no-quarter / step-away switch): nobody is at the
+            // keyboard to answer, so the question is swallowed the SAFE way — redact
+            // and send — and the decision surfaces as OUTPUT instead of a prompt:
+            // what was masked (the same masked samples the prompt's detail view
+            // shows, never a raw value) and where the redacted payload went.
+            action = "redact";
+            const notice =
+              `⚑ unattended — PII auto-redacted before send: ${piiInline(scan)} → ` +
+              `${TIERS[currentTier ?? "standard"].label} channel. ` +
+              `Best-effort structured detection only, not a guarantee.`;
+            const ui = ctx?.ui ?? lastUi;
+            const rendered = renderPiiAutoRedact?.(notice);
+            ui?.notify?.(rendered ?? notice, rendered ? "info" : "warning");
+          } else if (
             fresh.length > 0 &&
             piiChoice === "ask" &&
             piiPolicy === "warn" &&

@@ -4,6 +4,27 @@ All notable changes to **pi-privacy** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] — 2026-08-01
+
+### Added
+
+- **`piiUnattended` — the PII gate stops asking when nobody's there to answer.** A live
+  host signal (`boolean | () => boolean`, e.g. privateer's `--no-quarter` / shift+tab
+  switch). While true, the send-or-redact question is swallowed the *safe* way: the
+  payload is **auto-redacted and sent**, and the decision surfaces as output instead of
+  a prompt — `⚑ unattended — PII auto-redacted before send: 2 IP addresses
+  (192.168.1.•, 10.0.0.•) → Standard channel`, the same masked samples as the prompt's
+  detail view, never a raw value. The only-new-PII baseline still applies (one notice
+  per finding, not per turn), an explicit earlier "… + remember for session" answer
+  still wins, and flipping back to attended returns new findings to a real question.
+  Code-only on purpose — not settable from config, because it silences a question.
+- **`renderPiiAutoRedact`** — style hook for that notice, so a host can color-coat it
+  as its own kind of output (privateer paints the flag red and the body in its accent
+  color). Styled notices emit at `info` level (the host owns the look); plain ones at
+  `warning` so they stay visible.
+- **`piiInline(scan)`** — the one-line masked-breakdown form of `piiDetail`, exported
+  for hosts that surface findings in notices rather than prompts.
+
 ## [0.10.0] — 2026-07-31
 
 ### Added

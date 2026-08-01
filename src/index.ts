@@ -167,6 +167,7 @@ export {
   summarizePii,
   maskPii,
   piiDetail,
+  piiInline,
   newPii,
   mergePiiBaseline,
 } from "./pii/detect.ts";

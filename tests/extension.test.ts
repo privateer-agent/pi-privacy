@@ -259,6 +259,75 @@ test("PII gate: allowlisted values don't count, don't prompt, and aren't redacte
   assert.doesNotMatch(JSON.stringify(out2), /stranger@other\.com/);
 });
 
+test("PII gate: unattended swallows the prompt — auto-redacts, sends, surfaces a notice", async () => {
+  const pi = fakePi();
+  let asks = 0;
+  const notices: [string, string | undefined][] = [];
+  let unattended = true;
+  const ctx = {
+    hasUI: true,
+    ui: {
+      select: async () => (asks++, "Send as-is"),
+      notify: (m: string, level?: string) => notices.push([m, level]),
+    },
+  };
+  makePiPrivacyExtension({
+    installDispatcher: false,
+    downgradePolicy: "off",
+    piiUnattended: () => unattended,
+  })(pi as any);
+  pi.handlers["model_select"]({ model: { provider: "openrouter", id: "m" } }, {});
+  const req = pi.handlers["before_provider_request"];
+
+  const payload = { messages: [{ role: "user", content: "mail stranger@other.com" }] };
+  const out = await req({ payload }, ctx);
+  assert.equal(asks, 0, "the question is swallowed");
+  assert.doesNotMatch(JSON.stringify(out), /stranger@other\.com/, "passed through redacted");
+  assert.equal(notices.length, 1, "the decision surfaces as output");
+  assert.match(notices[0][0], /unattended — PII auto-redacted/);
+  assert.match(notices[0][0], /s…r@other\.com/, "masked sample shown");
+  assert.doesNotMatch(notices[0][0], /stranger@other\.com/, "never the raw value");
+  assert.equal(notices[0][1], "warning", "plain notice stays visible");
+
+  // Already decided → the same PII re-applies silently, no notice spam.
+  await req({ payload }, ctx);
+  assert.equal(notices.length, 1, "not re-noticed for the same PII");
+
+  // Attended again → NEW PII returns to a real question.
+  unattended = false;
+  const payload2 = {
+    messages: [{ role: "user", content: "mail stranger@other.com, card 4111 1111 1111 1111" }],
+  };
+  await req({ payload: payload2 }, ctx);
+  assert.equal(asks, 1, "attended again: new PII prompts");
+});
+
+test("PII gate: renderPiiAutoRedact styles the unattended notice (info level)", async () => {
+  const pi = fakePi();
+  const notices: [string, string | undefined][] = [];
+  const ctx = {
+    hasUI: true,
+    ui: {
+      select: async () => "Send as-is",
+      notify: (m: string, level?: string) => notices.push([m, level]),
+    },
+  };
+  makePiPrivacyExtension({
+    installDispatcher: false,
+    downgradePolicy: "off",
+    piiUnattended: true,
+    renderPiiAutoRedact: (n: string) => `<styled>${n}</styled>`,
+  })(pi as any);
+  pi.handlers["model_select"]({ model: { provider: "openrouter", id: "m" } }, {});
+  await pi.handlers["before_provider_request"](
+    { payload: { messages: [{ role: "user", content: "a@b.com" }] } },
+    ctx,
+  );
+  assert.equal(notices.length, 1);
+  assert.match(notices[0][0], /^<styled>⚑ unattended/);
+  assert.equal(notices[0][1], "info", "styled notice: the host owns the look");
+});
+
 test("posture badge: pending on select, then painted from the resolved tier", async () => {
   const pi = fakePi();
   const statuses: [string, string | undefined][] = [];

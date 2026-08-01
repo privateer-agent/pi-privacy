@@ -300,6 +300,20 @@ export function piiDetail(scan: PiiScan): string {
   return lines.join("\n");
 }
 
+// One-line form of piiDetail, for notices rather than prompts: masked samples inline
+// after each count — "2 IP addresses (192.168.1.•, 10.0.0.•), 1 email (p…k@x.com)".
+// Same masking rules as piiDetail: never a raw value, sampleless types show count only.
+export function piiInline(scan: PiiScan): string {
+  return scan.hits
+    .map((h) => {
+      const shown = scan.samples.filter((s) => s.type === h.type).map((s) => s.masked);
+      const more = h.count - shown.length;
+      const tail = shown.length ? ` (${shown.join(", ")}${more > 0 ? `, +${more} more` : ""})` : "";
+      return `${summarizePii([h])}${tail}`;
+    })
+    .join(", ");
+}
+
 // ── "only prompt on NEW PII" ─────────────────────────────────────────────────
 // The outbound payload is the WHOLE conversation, so PII you already decided about
 // is still there on every later turn. Diffing against what was already decided is

@@ -202,6 +202,15 @@ to fire on **what you haven't already answered**:
   than vanished, and a project-local `pi-privacy.config.json` may not add entries at all
   (see [the floor](#a-project-you-open-cant-disarm-you)) — "allowlist my domain" from a
   repo you just cloned is an off switch wearing a different hat.
+- **Unattended mode doesn't block on a question nobody will answer.** Pass
+  `piiUnattended` (a live `() => boolean`, e.g. the host's "step away from the keyboard"
+  switch) and while it's true the prompt is swallowed the *safe* way: the payload is
+  **auto-redacted and sent**, and the decision surfaces as output — the same masked
+  breakdown, plus where it went. `renderPiiAutoRedact: (notice) => string` lets the host
+  color-code that notice as its own kind of output (styled notices emit at `info` level,
+  plain ones at `warning`). Code-only, not settable from config: it silences a question,
+  so only the host that owns the unattended state may assert it. An explicit earlier
+  "… + remember for session" answer still wins.
 
 **Honesty bound (the whole point):** this is *best-effort structured detection*,
 never a guarantee. It is local + deterministic — it never sends your data to a model to
