@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { optionsFromEnv, sanitizeConfig, loadConfig, clampProjectConfig } from "../src/config.ts";
+import { CODE_ONLY_OPTIONS } from "../src/options.ts";
 
 // A warn collector so we can assert honest-failure behavior (invalid values warn +
 // fall through to the default rather than silently coercing).
@@ -96,6 +97,34 @@ test("sanitizeConfig validates types and rejects code-only + unknown keys", () =
   assert.deepEqual(opts, { piiPolicy: "warn", showBadge: true, badgeSinks: ["widget"] });
   assert.ok(msgs.some((m) => /enforceOpenRouterZdr/.test(m) && /boolean/.test(m)));
   assert.ok(msgs.some((m) => /onPosture/.test(m) && /code-only/.test(m)));
+});
+
+// The two code-only options that are not merely "a callback JSON can't express":
+// privateerVerifiedTee lifts a privacy LABEL and piiUnattended SILENCES the PII
+// question. A file that sets either must be dropped AND must say so — a silent drop
+// is indistinguishable from a setting that took effect.
+test("sanitizeConfig rejects the label/silencing levers, by name, with a reason", () => {
+  const { warn, msgs } = collector();
+  const opts = sanitizeConfig(
+    { piiPolicy: "warn", privateerVerifiedTee: true, piiUnattended: true, renderPiiAutoRedact: {} },
+    warn,
+  );
+  assert.deepEqual(opts, { piiPolicy: "warn" });
+  for (const k of ["privateerVerifiedTee", "piiUnattended", "renderPiiAutoRedact"])
+    assert.ok(
+      msgs.some((m) => m.includes(k) && /code-only/.test(m)),
+      `expected a code-only warning naming ${k}`,
+    );
+});
+
+// The type and the runtime check are derived from one list, so this guards the pair
+// staying in sync: every key in CODE_ONLY_OPTIONS must actually be refused.
+test("every CODE_ONLY_OPTIONS key is refused by sanitizeConfig", () => {
+  for (const key of CODE_ONLY_OPTIONS) {
+    const { warn, msgs } = collector();
+    assert.deepEqual(sanitizeConfig({ [key]: true }, warn), {}, `${key} leaked through`);
+    assert.ok(msgs.some((m) => m.includes(key) && /code-only/.test(m)), `${key} was dropped silently`);
+  }
 });
 
 test("sanitizeConfig rejects a non-object", () => {

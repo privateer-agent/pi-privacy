@@ -1,10 +1,14 @@
-// Public API for the pi-privacy package (working name).
+// Public API for the pi-privacy package.
 //
-// Two things a consumer wants: (1) the honest privacy taxonomy — tiers + provider
-// catalog — and (2) [coming next] the Pi extension that registers these providers,
-// installs the attestation dispatcher, verifies TEE posture, and enforces/labels
-// ZDR. This turn ships (1) + the catalog; the attestation engine + extension land
-// next (ported from privateer 0.2 attestation.ts).
+// Two things a consumer wants: (1) the honest privacy taxonomy — tiers, provider
+// catalog, attestation engine, and the pure assessors behind each gate — and (2)
+// the Pi extension that wires them together: registers the providers, installs the
+// attestation dispatcher, verifies TEE posture, enforces/labels ZDR, and runs the
+// PII / exfil / ingest / downgrade / tool-surface gates.
+//
+// Nearly everything below is PURE and independently testable on purpose. A privacy
+// claim you can't check in isolation is a privacy claim you're taking on faith,
+// which is the thing this package exists to refuse.
 
 export {
   type PrivacyTier,
@@ -80,12 +84,27 @@ export {
   verifyModelPosture,
 } from "./posture/verify.ts";
 
-export {
-  type PiPrivacyOptions,
-  type BadgeSink,
-  makePiPrivacyExtension,
-  default as piPrivacyExtension,
-} from "./extension.ts";
+export { makePiPrivacyExtension, default as piPrivacyExtension } from "./extension.ts";
+
+// Every option the extension takes, and the code-only boundary: which of them may
+// NEVER come from a config file, because they assert a privacy label or silence a
+// prompt (see options.ts).
+export { type PiPrivacyOptions, type CodeOnlyOption, CODE_ONLY_OPTIONS } from "./options.ts";
+
+// The live posture badge: what a tier looks like, and whether a given UI can draw it.
+export { type BadgeSink, DEFAULT_BADGE_SINKS, postureBadge, renderBadgeTo } from "./ext/badge.ts";
+
+// Pi's extension surface as this package uses it — structural, so the package
+// compiles and runs without the (optional peer) Pi packages installed.
+export type { PiModel, PiModelRegistry, PiUi, PiCtx, PiExtensionApiLike } from "./ext/pi-api.ts";
+
+// Provider registration (pure): which catalog entries Pi doesn't already ship, and
+// the provider config to register each under.
+export { registerable, providerConfig, nearApiKey } from "./ext/register.ts";
+
+// Outbound-payload helpers (pure): what the PII gate reads, and the structural
+// redaction that masks it without deforming the request.
+export { payloadText, redactPayloadPii } from "./ext/payload.ts";
 
 export { veniceRequestPatch, openRouterZdrPatch } from "./ext/patches.ts";
 

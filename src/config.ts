@@ -8,8 +8,9 @@
 //   2. environment variables (PI_PRIVACY_*)
 //
 // env overrides the file. Only the SERIALIZABLE options are settable here; the
-// function options (onPosture / resolveTier / renderBadge) are code-only and are
-// reached by importing makePiPrivacyExtension() directly.
+// code-only options (see CODE_ONLY_OPTIONS in options.ts — the callbacks, plus the
+// two levers that assert a privacy label or silence a question) are reached by
+// importing makePiPrivacyExtension() directly.
 //
 // Honesty carries through from the rest of the package: an invalid value is never
 // silently coerced to a default that might be LESS protective than the user meant
@@ -17,15 +18,13 @@
 // warns and falls through to the built-in default, and says so.
 
 import { readFileSync } from "node:fs";
-import type { PiPrivacyOptions, BadgeSink } from "./extension.ts";
+import { CODE_ONLY_OPTIONS, type ConfigurableOptions } from "./options.ts";
+import type { BadgeSink } from "./ext/badge.ts";
 
-// The subset of options config can set: everything except the function callbacks and
-// privateerVerifiedTee (a privacy-LABEL lever — only a host that operates the account
-// channel may assert it, never a config file).
-export type ConfigurableOptions = Omit<
-  PiPrivacyOptions,
-  "onPosture" | "resolveTier" | "renderBadge" | "privateerVerifiedTee"
->;
+// The subset of options config can set — derived from the code-only boundary in
+// options.ts, so the type and the runtime warning below can never disagree about
+// which keys a file is allowed to set.
+export type { ConfigurableOptions } from "./options.ts";
 
 const POLICY3 = ["warn", "redact", "off"] as const; // piiPolicy, toolResultPolicy
 const TOOL_POLICY = ["warn", "block", "off"] as const; // toolExfilPolicy
@@ -223,8 +222,12 @@ export function sanitizeConfig(raw: unknown, warn: Warn): ConfigurableOptions {
     else warn(`config.toolSurfaceCommand=${JSON.stringify(val)} is not a non-empty string — ignoring.`);
   }
 
+  // Say why a code-only key was ignored rather than dropping it in silence. Two of
+  // these (privateerVerifiedTee, piiUnattended) would LOOSEN what the user sees —
+  // one lifts a privacy label, the other swallows the PII question — so a file that
+  // tries to set them is exactly the case that must not pass unremarked.
   for (const k of Object.keys(src)) {
-    if (k === "onPosture" || k === "resolveTier" || k === "renderBadge" || k === "privateerVerifiedTee")
+    if ((CODE_ONLY_OPTIONS as readonly string[]).includes(k))
       warn(`config.${k} is a code-only option and can't be set from JSON — import makePiPrivacyExtension() to use it.`);
   }
   return opts;

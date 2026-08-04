@@ -80,9 +80,12 @@ export PI_PRIVACY_ENFORCE_OPENROUTER_ZDR=true
 
 Honest by default: an invalid value (`PI_PRIVACY_PII_POLICY=redct`) is **never** quietly
 coerced to something less protective than you meant — it warns and falls back to the
-built-in default. The three function options (`onPosture`, `resolveTier`, `renderBadge`)
-are code-only; reach them by importing `makePiPrivacyExtension` (see [Programmatic
-use](#programmatic-use)).
+built-in default. Six options are **code-only** and can't be set here at all — the four
+callbacks (`onPosture`, `resolveTier`, `renderBadge`, `renderPiiAutoRedact`) plus
+`privateerVerifiedTee` and `piiUnattended`, because one lifts a privacy *label* and the
+other *silences a question*: only a host that genuinely operates that channel may assert
+them. Reach them by importing `makePiPrivacyExtension` (see [Programmatic
+use](#programmatic-use)); a config file naming one is ignored, with a warning saying why.
 
 ### A project you open can't disarm you
 
@@ -534,8 +537,10 @@ effectiveTier("openrouter", { zdrEnforced: true }); // → "zdr-enforced"
 `makePiPrivacyExtension(options?)` — `installDispatcher`, `registerProviders`,
 `enforceOpenRouterZdr`, `useDispatcherTransport`, `onPosture`, `resolveTier`,
 `piiPolicy`, `piiAllow`, `piiAllowDefaults`, `toolExfilPolicy`, `toolResultPolicy`, `downgradePolicy`, `modelPicker`, `modelPickerCommand`,
-`toolSurfacePolicy`, `toolSurfaceCommand`, `showBadge`, `badgeSinks`, `badgeKey`, `renderBadge`. Every option except the three
-functions (`onPosture`/`resolveTier`/`renderBadge`) is also settable with **no code**
+`toolSurfacePolicy`, `toolSurfaceCommand`, `showBadge`, `badgeSinks`, `badgeKey`, `renderBadge`,
+`piiUnattended`, `renderPiiAutoRedact`, `privateerVerifiedTee`. Every option except the six
+code-only ones (`CODE_ONLY_OPTIONS` — the four callbacks plus `privateerVerifiedTee` and
+`piiUnattended`) is also settable with **no code**
 via env vars or `pi-privacy.config.json` — see [Configure it](#configure-it--no-code-required).
 
 ## Contributing & security

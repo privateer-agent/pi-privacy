@@ -8,9 +8,10 @@
 // enforceOpenRouterZdr, badge sinks, …) WITHOUT writing any TypeScript. See
 // src/config.ts for the variable names and precedence (env overrides file).
 //
-// Consumers who need the code-only options (onPosture, resolveTier, renderBadge), or
-// who want to ignore ambient config entirely, import { makePiPrivacyExtension } from
-// the package root and pass options directly.
+// Consumers who need the code-only options (onPosture, resolveTier, renderBadge,
+// privateerVerifiedTee, piiUnattended, renderPiiAutoRedact — see CODE_ONLY_OPTIONS in
+// src/options.ts), or who want to ignore ambient config entirely, import
+// { makePiPrivacyExtension } from the package root and pass options directly.
 import { makePiPrivacyExtension } from "../src/extension.ts";
 import { loadConfig } from "../src/config.ts";
 
