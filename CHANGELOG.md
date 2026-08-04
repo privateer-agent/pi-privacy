@@ -4,6 +4,70 @@ All notable changes to **pi-privacy** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] — 2026-08-04
+
+Housekeeping release: no new guard, one guard that now fires where it used to stay
+quiet, and a dependency advisory closed in the component this package's attestation
+binding depends on.
+
+### Fixed
+
+- **Two code-only options were code-only in their docs and nowhere else.**
+  `piiUnattended` and `renderPiiAutoRedact` were documented as unsettable from config,
+  but `ConfigurableOptions` never omitted them and `sanitizeConfig` never named them —
+  so a `pi-privacy.config.json` setting either was dropped in **silence**. For
+  `piiUnattended` that is the sharp case: it is the lever that *swallows the PII
+  question*, and a silent drop is indistinguishable from a setting that took effect.
+  There is now one list — `CODE_ONLY_OPTIONS` — the type is derived from it and the
+  loader warns on exactly it, so the two cannot drift apart. A file naming any of the
+  six is ignored **and says so**.
+- **`/verify` and the badge can no longer attest under different settings.** Both built
+  the attestation inputs (`apiKey` / `zdrEnforced` / `transport`) independently; they
+  now share one `postureOpts()`. Nothing was observably wrong, but in a package whose
+  entire claim is that the badge is *earned*, the command that proves the badge
+  disagreeing with the badge is the worst bug available.
+
+### Changed
+
+- **The PII gate now asks in cases where it previously stayed quiet.** Every other gate
+  resolved "can we prompt?" as `(ctx?.hasUI ?? lastHasUI)` — falling back to the last
+  event context, because some guards run detached from one. The PII gate checked
+  `ctx?.hasUI` bare, so on a host whose request context omits `hasUI` it silently took
+  its no-prompt branch instead of asking. All five gates now share one `canPrompt` /
+  `ask` / `notify` definition. Strictly more protective, and it is what the gate was
+  always meant to do — but it is a behavior change, not a pure refactor.
+- **`extension.ts` is wiring only** (1151 → 857 lines). Everything that can be a pure
+  function of its inputs now is, in its own module with its own tests: `options.ts`
+  (the option shape + the code-only boundary), `ext/pi-api.ts` (Pi's structural
+  surface), `ext/badge.ts` (`postureBadge` / `renderBadgeTo` / `DEFAULT_BADGE_SINKS`),
+  `ext/register.ts` (`registerable` / `providerConfig` / `nearApiKey`), `ext/payload.ts`
+  (`payloadText` / `redactPayloadPii`). A privacy claim you cannot check in isolation is
+  a privacy claim you are taking on faith. All of it is exported from the package root;
+  no existing import path changed. 217 tests (up from 198).
+
+### Security
+
+- **`undici` 7.28.0 → 7.29.0**, closing [GHSA-8xcm-r25x-g524] (downstream response
+  desynchronization via the retry interceptor, high) among others. Not an incidental
+  dependency here: `undici`'s dispatcher is what binds Tinfoil attestation to the real
+  inference connection, so its request path is inside this package's trust story.
+  (The advisories remaining under `npm audit` are a *nested* undici 8.x beneath the
+  optional `@earendil-works/pi-coding-agent` peer — dev-only, never shipped to
+  consumers, and not resolvable from here without downgrading that package.)
+
+### Housekeeping
+
+- `.npmrc` is committed, so a fresh clone actually gets the supply-chain policy the repo
+  documents (`ignore-scripts`, `save-exact`) rather than only the contributors who
+  happened to have it.
+- `@types/node` `^20` → `^22`, matching `engines: node >=22.19.0` — typechecking against
+  an older standard library than the package requires.
+- Stale docs corrected: `src/index.ts` still announced the extension as "coming next"
+  eight releases after it shipped, and the README / package entry both listed three
+  code-only options when there are six.
+
+[GHSA-8xcm-r25x-g524]: https://github.com/advisories/GHSA-8xcm-r25x-g524
+
 ## [0.11.0] — 2026-08-01
 
 ### Added
@@ -360,6 +424,8 @@ All notable changes to **pi-privacy** are documented here. The format follows
   NEAR AI (report-body over HTTPS), observable ZDR enforcement for OpenRouter, on-device
   detection for loopback endpoints, and the `/verify` command.
 
+[0.12.0]: https://github.com/privateer-agent/pi-privacy/releases/tag/v0.12.0
+[0.11.0]: https://github.com/privateer-agent/pi-privacy/releases/tag/v0.11.0
 [0.10.0]: https://github.com/privateer-agent/pi-privacy/releases/tag/v0.10.0
 [0.9.0]: https://github.com/privateer-agent/pi-privacy/releases/tag/v0.9.0
 [0.8.0]: https://github.com/privateer-agent/pi-privacy/releases/tag/v0.8.0
